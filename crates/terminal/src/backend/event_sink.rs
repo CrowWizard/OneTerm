@@ -101,6 +101,18 @@ impl SessionEventSink {
         }
     }
 
+    /// Checked delivery for native batches and backend lifecycle adaptation.
+    /// `false` means the receiver closed; cancellation must be handled by caller.
+    #[cfg(feature = "ghostty-native")]
+    pub async fn send_checked(&self, event: SessionEvent) -> bool {
+        debug_assert!(!matches!(event, SessionEvent::Output));
+        if let Err(error) = self.event_tx.send(event).await {
+            self.record_closed(error);
+            return false;
+        }
+        true
+    }
+
     fn record_closed(&self, error: impl std::fmt::Debug) {
         self.counters.event_closed.fetch_add(1, Ordering::Relaxed);
         warn!("SessionEventSink: event lost because the channel is closed: {error:?}");

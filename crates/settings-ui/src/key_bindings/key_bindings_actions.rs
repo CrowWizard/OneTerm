@@ -486,20 +486,25 @@ mod tests {
             );
         }
 
-        // And the surfaces M1 names by hand are on the denied side.
+        // Explicit connections and SFTP work; saved-session management stays read-only.
         for id in [
             "new_ssh_session",
             "open_session",
-            "delete_session",
-            "session_property",
             "sftp_open",
             "sftp_upload_files",
             "sftp_delete",
         ] {
             assert_eq!(
                 oneterm_actions::action_classified_for_elevated_window(id),
+                Some(true),
+                "{id} is an explicit SSH/SFTP operation"
+            );
+        }
+        for id in ["delete_session", "session_property"] {
+            assert_eq!(
+                oneterm_actions::action_classified_for_elevated_window(id),
                 Some(false),
-                "{id} reaches SSH or SFTP and must not run in an elevated window"
+                "{id} modifies saved sessions"
             );
         }
 

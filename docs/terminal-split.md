@@ -84,8 +84,21 @@ The owning design is
 4. **Persistence**: **not persisted** for the MVP — on restart a tab is a single
    terminal (matches the fact that terminal sessions don't persist anyway).
 5. **Language**: docs are written in **English** (AGENTS.md core principle #6).
-6. **Drop target**: only an **empty** Space accepts a dropped tab. A Space that
-   already holds a terminal is not droppable (no edge-aware split-on-drop).
+6. **Drop target** (owner amendment 2026-11-16): an empty Space fills directly.
+   Over an occupied Space of another terminal tab, the nearest normalized
+   left/right/top/bottom edge determines a translucent half-Space preview.
+   Releasing splits that Space in the previewed direction and moves the pane;
+   hovering never creates/resizes Spaces or restarts sessions. Same-tab occupied
+   and invalid/foreign/ambiguous-source drops remain inert.
+   Move the source tab's active terminal. If its active Space is empty after
+   a split, move its sole terminal instead (including within the same tab).
+   Do not guess when multiple inactive terminals remain. Preserve pane
+   identity, input-channel membership and session lifetime; remove a different
+   source tab only once it contains no terminals.
+   During that drag, hovering another terminal tab reveals its content without
+   consuming the drag: start on selected tab 1, hover tab 2, then release in
+   tab 2's empty Space. The strip, expanded rail and collapsed rail share this
+   behavior. Hover selection alone never transfers a session or reorders tabs.
 7. **Active after split**: the **new empty** Space becomes active.
 8. **Border**: originally a uniform 4px frame; shipped as a neutral **1px outer border +
     1px inner gutter** per Space (`space/render.rs`), see [05](terminal-split/05-rendering-theme.md).

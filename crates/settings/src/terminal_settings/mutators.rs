@@ -13,13 +13,16 @@ const ZOOM_MIN: f32 = 6.0;
 const ZOOM_MAX: f32 = 100.0;
 
 impl TerminalSettings {
-    /// Set the shell kind (resets the auto-detected program).
+    /// Changing the shell kind clears its program; reselecting it preserves it.
     pub fn set_kind(&mut self, kind: ShellKind) {
+        if self.shell.kind == kind {
+            return;
+        }
         self.shell.kind = kind;
         self.shell.program = None;
     }
 
-    /// Set a custom program path (Custom).
+    /// Set the executable override (Custom or PowerShell 7 in Settings).
     pub fn set_program(&mut self, program: String) {
         self.shell.program = if program.trim().is_empty() {
             None

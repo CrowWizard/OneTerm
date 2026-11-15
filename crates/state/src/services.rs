@@ -138,9 +138,11 @@ mod tests {
         WorkspaceCommands {
             new_terminal_with_shell: terminal,
             open_quick_connect_dialog: window,
+            open_quick_connect_to: |_, _, _| {},
             open_new_saved_session_dialog: window,
             saved_ssh_sessions: saved_sessions,
             open_saved_ssh_session: open_saved_session,
+            open_saved_ssh_session_to: |_, _, _, _| {},
             open_duplicate_ssh_dialog: duplicate_ssh,
             open_settings: app,
             open_about: window,

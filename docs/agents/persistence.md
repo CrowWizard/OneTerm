@@ -53,6 +53,27 @@ directly on the UI thread.
 
 ## Schema owners
 
+PowerShell 7 executable settings (US-0250) reuse terminal.json's existing optional
+shell.program path, not a new field or schema. Empty input stores None for
+auto-detection. Kind changes clear the override; selecting the same kind retains
+it. TerminalSettings' existing snapshot/background writer persists it. Restricted
+processes neither persist the edit nor execute the configured override (M3/M4).
+
+Native-workspace acceptance storage (`US-0249`, DEC-0023 amendment): only the
+explicit default-off `isolated-config` core feature exposes a once-only root
+selection, before any config_dir access. The native composition root prepares
+`oneterm-native-data` beside its executable and never imports/falls back to the
+normal debug/release data directories. Root selection rejects relative paths,
+links/reparse points and late/repeated selection. Existing schema owners and
+elevation write refusals still apply, except US-0258's explicitly approved
+create-only Session append; isolation itself grants no write permission.
+Automatic startup SSH and update checks are suppressed
+by this test entry. Normal production startup/path selection is unchanged.
+US-0251 explicitly selects `config_dir()/known_hosts` for native direct SSH,
+using the existing OpenSSH-format strict verification and approval writer. It
+does not read, import or append the daily `~/.ssh/known_hosts`. No session or
+secret schema changes; existing isolated-root and elevation restrictions remain.
+
 | Document | Owner | Notes |
 |---|---|---|
 | `terminal.json` | `oneterm-settings` | Terminal configuration schema and defaults, including the global local/SSH output-logging policy, destination, and write mode; the `ssh` keepalive policy (`enabled = true`, interval `30` seconds by default, validated to `5..=3600`, unanswered-request limit `3` by default, validated to `1..=20`, captured by newly opened sessions); and the `sftp` group (SFTP browser Edit workflow: editor mode/program/args and the max edit file size). |
@@ -71,6 +92,18 @@ not allowed. Only the document owner quarantines: `update_dock_document` moves a
 invalid `docks.json` aside, applies the update to a default document, and reports
 `DockUpdateOutcome::RecoveredFromInvalidData` so the caller can log the recovery
 (`oneterm-state` has no logger of its own); feature crates never quarantine it.
+
+## Optional startup SSH session
+
+`ssh_session.json` also owns optional top-level `startup_session_id` (`US-0207`),
+a positive stable session id. Schema v2 is unchanged; an absent/null or invalid
+value disables auto-connect (invalid values warn, without quarantining sessions).
+A dangling id is reported at startup, never replaced with another session.
+Identity repairs and legacy-schema migration disable this preference so a reassigned id cannot retarget an
+automatic connection. Removing the selected session clears the id in the same
+snapshot; duplicating a session does not copy the preference. The session store's
+existing single-flight sealed-document writer persists it. Restricted processes
+cannot change it or automatically connect it.
 
 ## Secrets at rest
 
@@ -117,36 +150,28 @@ schema loading, invalid-file quarantine, backup preservation, and concurrent
 updates for shared documents. Tests must never write to the developer's real
 configuration directory.
 
-## Elevation: a process that reads and never writes
+## Elevation: restricted writes
 
-An **elevated** OneTerm process (`IN-0043`, `DEC-0019` M4) persists nothing. Before adding a
-write, a document, or a recovery step, check it against this rule — it is a property of the
-process, not of any one document, so a new writer inherits it only if it is put in the right
-place.
+US-0259 / DEC-0019 amendment (owner approved 2026-11-15) grants confirmed
+administrators ordinary application functionality. `is_restricted()` is true
+only for Unknown tokens, not for confirmed Elevated tokens. The earlier US-0258
+create-only append branch is retired; ordinary owner/snapshot workflows apply.
+See IN-0057's `low-level-design/administrator-functional-parity.md`.
 
-| Document | Elevated |
-|---|---|
-| `ui_config.json`, `terminal.json` | read; every write refused by `write_refusal(elevated)`, the one function both shared write entry points ask |
-| `docks.json` | **not read either.** `load_layout` restores side docks *by name*, so reading it would build the SSH Client panel in a window that must not have one. Writes refused in `save_state_to` |
-| `ssh_session.json`, `update_config.json` | read; writes refused in each document's own shared write function |
-| `vault.json` | read; set-up, password change and reset refused with `VaultError::ReadOnly` in `oneterm-vault`'s one write function (`document::write`) |
-| terminal logs | never opened. An arbitrary path from `terminal.json` plus `write_mode: overwrite` is a create-or-truncate primitive under an administrator token |
-| crash reports | own store, `crashes/elevated/` |
+| Document | Confirmed ordinary or administrator | Unknown token |
+|---|---|---|
+| `ui_config.json`, `terminal.json` | Ordinary reads/writes, including defaults and recovery | Read/defaults in memory; shared write and quarantine refusal |
+| `docks.json` | Restore and persist ordinary layout/Spaces | Never read or write; fixed default layout |
+| `ssh_session.json` | Ordinary creation, edits, deletion, groups, startup and encrypted passwords | No management or snapshot writes |
+| `update_config.json` | Ordinary preferences and cache writes | Shared write refusal |
+| `vault.json` | Ordinary encrypted setup, password change and confirmed reset | Writes return `VaultError::ReadOnly` |
+| terminal logs | Ordinary automatic/manual logging, configured path/mode | Never opened |
+| crash reports | Actual administrator identity selects `crashes/elevated/` | Separate restricted crash store |
 
-Three rules that are easy to miss, and were all missed once:
-
-1. **A first-run default write is a write.** `UiConfig::load_from` and
-   `TerminalConfig::load_from` create the file when it is absent — *during the load*, so a
-   flag set after loading does not stop it. Under over-the-shoulder elevation that directory
-   belongs to another account.
-2. **A quarantine is a write.** `quarantine_file` renames the user's document, and the guards
-   on the write entry points do not cover it. One guard lives inside `quarantine_file` itself
-   so every caller is covered at once; an elevated process meeting a corrupt document starts
-   on the defaults and leaves the file for the ordinary one.
-3. **Put the guard in the shared function, never at the call sites.** Every guard above sits
-   at the deepest point its document's writes pass through, so a caller added later is
-   covered by construction. The one place that was gated at a *builder* instead of at the
-   *restore* is the one that shipped a hole.
-
-The switch is `oneterm_core::elevation::is_restricted()` — true for an elevated token **and**
-for a token query that failed. There is deliberately no `is_elevated()` beside it.
+First-run creation and quarantine are writes too: keep Unknown guards in shared
+write/recovery functions, not just UI call sites. Preserve unreadable-file refusal,
+schema validation, encryption, atomic writes/backups and ordinary destructive
+confirmation. Administrator-created ownership/ACL differences remain Windows
+constraints accepted by the owner; do not bypass OS boundaries. Token identity
+and window marking must inspect `elevation()` rather than infer identity from
+the permission predicate. No cross-window snapshot merge redesign is implied.

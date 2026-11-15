@@ -3,9 +3,19 @@
 pub(crate) mod completion;
 pub(crate) mod highlight;
 pub(crate) mod input;
+#[cfg(feature = "ghostty-native")]
+mod native_pane;
+#[cfg(feature = "ghostty-native")]
+pub use native_pane::{NativePaneCompletion, NativeTerminalPane};
+#[cfg(feature = "ghostty-native")]
+mod native_surface;
+#[cfg(feature = "ghostty-native")]
+pub use native_surface::{NativeSurfaceError, NativeTerminalSurface};
 pub(crate) mod panel;
 pub(crate) mod render;
 pub(crate) mod security;
+mod session_cleanup;
+pub use session_cleanup::{close_unplaced_session, close_unplaced_session_in_workspace};
 pub(crate) mod space;
 pub(crate) mod status;
 pub(crate) mod terminal_view;
@@ -37,3 +47,9 @@ pub fn init(cx: &mut App) {
         ))
     });
 }
+#[cfg(feature = "ghostty-native")]
+mod native_workspace_sessions;
+#[cfg(feature = "ghostty-native")]
+pub use native_workspace_sessions::{
+    NativeConnectionGuard, NativeWorkspaceCompletion, NativeWorkspaceSessions,
+};

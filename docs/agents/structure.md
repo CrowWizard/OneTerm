@@ -41,9 +41,12 @@ OneTerm/
 │   │       ├── crash_report.rs     # Crash store: panic hook, native staging promotion, retention (docs/crash-reporting.md)
 │   │       ├── crash_report_dialog.rs # Recovery dialogs shown after the main window opens
 │   │       ├── native_crash.rs     # crash-handler callback (compromised-context-safe writes)
+│   │       ├── native_desktop.rs   # Historical standalone acceptance fixture (test-only)
+│   │       ├── native_workspace.rs # Default-off actual-workspace native entry, isolated storage and close observation
 │   │       ├── window.rs           # open_window(cx) — create window + attach OneTermWorkspace
 │   │       └── bin/
-│   │           └── oneterm.rs          # Binary → oneterm(.exe) (WINDOWS subsystem in release)
+│   │           ├── oneterm.rs          # Binary → oneterm(.exe) (WINDOWS subsystem in release)
+│   │           └── oneterm-native-desktop.rs # Explicit native-desktop feature-gated workspace test entry
 │   │
 │   ├── core/                       # Domain model — leaf crate (no gpui, no terminal engine)
 │   │   ├── Cargo.toml              # name = "oneterm-core"
@@ -59,11 +62,14 @@ OneTerm/
 │   │       └── config/             # Local shell config + shared UI enums
 │   │           ├── mod.rs
 │   │           ├── shell.rs        # LocalShellConfig + ShellKind + resolve_shell + config_dir
+│   │           ├── isolated.rs     # Default-off, once-only test configuration-root selection
 │   │           └── env.rs
 │   │
 │   ├── terminal/                   # Terminal ADAPTER over `oneterm-vt` (no gpui) — `oneterm-terminal`
 │   │   ├── Cargo.toml              # deps: core, oneterm-vt, parking_lot, async-channel, base64
+│   │   ├── build.rs                # Explicit ghostty-native staging link; inert for default builds
 │   │   └── src/
+│   │       ├── ghostty.rs           # Staged, thread-confined libghostty-vt owner; not used by either backend yet
 │   │       ├── lib.rs              # Re-export TerminalSession, SessionEvent, TerminalContent, PtySize…
 │   │       ├── factory.rs          # PtySize (+ PtySize::INITIAL) + SessionFactory trait
 │   │       ├── session.rs          # TerminalSession trait + SessionEvent + CursorBounds + NetStats

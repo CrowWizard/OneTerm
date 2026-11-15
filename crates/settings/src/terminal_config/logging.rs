@@ -57,12 +57,8 @@ impl LoggingConfig {
         )
     }
 
-    /// M4 (`DEC-0019`): an elevated window writes no configuration — and a
-    /// terminal log is a file it would create, at a path `terminal.json` chose,
-    /// under an administrator token. With `LogWriteMode::Overwrite` that is a
-    /// create-or-**truncate** primitive at an arbitrary path, which is a
-    /// destructive capability on its own and not something an elevated window
-    /// needs. Logging is therefore off there regardless of what the file says.
+    /// Unknown tokens cannot open config-selected log paths. Confirmed
+    /// administrators retain ordinary logging and write modes (US-0259).
     ///
     /// `restricted` is a parameter so the rule has a unit test that neither
     /// needs Windows nor flips the process global under the other tests.

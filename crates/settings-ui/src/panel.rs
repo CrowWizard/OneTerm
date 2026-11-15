@@ -127,7 +127,7 @@ impl SettingsPanel {
     /// font, key bindings are all read. What an elevated window does not do is
     /// write any of it back, and a page that accepts an edit and then loses it
     /// without saying so is the dishonest half of M4 (`IN-0043` MIN-4).
-    const READ_ONLY_NOTE: &'static str = "This is an administrator window: settings changed here apply until it closes and are not saved.";
+    const READ_ONLY_NOTE: &'static str = "The process token could not be verified: settings changed here apply until it closes and are not saved.";
 }
 
 impl Focusable for SettingsPanel {
@@ -183,7 +183,7 @@ mod tests {
     #[test]
     fn the_elevated_settings_note_says_the_edits_are_not_saved() {
         let note = SettingsPanel::READ_ONLY_NOTE;
-        assert!(note.contains("administrator"));
+        assert!(note.contains("token could not be verified"));
         assert!(note.contains("not saved"));
     }
 

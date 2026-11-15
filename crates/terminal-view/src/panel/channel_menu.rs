@@ -80,19 +80,19 @@ pub(super) fn channel_item_label(item: ChannelMenuItem) -> String {
 impl TerminalPanel {
     /// The channel of the active Space, if it is a member.
     fn active_channel(&self, cx: &App) -> Option<InputChannel> {
-        let view = self.active_view()?;
+        let view = self.tree.active_terminal()?;
         self.deps
             .input_channels
             .as_ref()?
             .read(cx)
-            .channel_of(view.entity_id())
+            .channel_of(view.id())
     }
 
     /// The submenu's entries for this tab; `None` while the active Space holds no terminal
     /// (an empty Space cannot join a channel) or its session has exited (`US-0200`), which
     /// [`channel_submenu`] shows as a disabled row.
     pub(super) fn channel_entries(&self, cx: &App) -> Option<Vec<ChannelMenuItem>> {
-        if !self.active_view()?.read(cx).session_alive(cx) {
+        if !self.tree.active_terminal()?.session_alive(cx) {
             return None;
         }
         Some(channel_menu_items(
@@ -107,13 +107,13 @@ impl TerminalPanel {
     pub(super) fn apply_channel_item(&mut self, item: ChannelMenuItem, cx: &mut Context<Self>) {
         match item {
             ChannelMenuItem::Join(channel, _) => {
-                if let Some(view) = self.active_view() {
-                    view.update(cx, |view, cx| view.join_channel(channel, cx));
+                if let Some(view) = self.tree.active_terminal() {
+                    view.join_channel(channel, cx);
                 }
             }
             ChannelMenuItem::Leave => {
-                if let Some(view) = self.active_view() {
-                    view.update(cx, |view, cx| view.leave_channel(cx));
+                if let Some(view) = self.tree.active_terminal() {
+                    view.leave_channel(cx);
                 }
             }
             ChannelMenuItem::Close(channel) => {

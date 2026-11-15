@@ -80,6 +80,15 @@ pub(crate) fn open_failure(error: OpenError) -> String {
     format!("The saved password cannot be used: {reason}.")
 }
 
+/// Decide whether startup can attempt the selected authentication method.
+fn startup_credential_ready(method: SshAuthPreference, saved: bool, has_key: bool) -> bool {
+    match method {
+        SshAuthPreference::Password => saved,
+        SshAuthPreference::PrivateKey => has_key,
+        SshAuthPreference::Agent => true,
+    }
+}
+
 /// UI state shared by saved-session and Quick Connect authentication forms.
 #[derive(Clone)]
 pub(crate) struct SshAuthForm {
@@ -170,6 +179,16 @@ impl SshAuthForm {
 
     pub(crate) fn uses_saved(&self) -> bool {
         self.use_saved.get() && self.has_saved()
+    }
+
+    /// Whether startup can attempt this form without guessing an empty password.
+    /// An encrypted key may still ask for a passphrase after the normal attempt.
+    pub(crate) fn ready_for_startup(&self, cx: &App) -> bool {
+        startup_credential_ready(
+            self.method(),
+            self.uses_saved(),
+            !self.key_path.read(cx).value().trim().is_empty(),
+        )
     }
 
     /// Offer "Save password" under a typed password.
@@ -651,6 +670,35 @@ mod tests {
     use gpui_component::Root;
 
     use super::*;
+
+    #[test]
+    fn startup_never_guesses_a_missing_password_or_key_path() {
+        assert!(!startup_credential_ready(
+            SshAuthPreference::Password,
+            false,
+            false
+        ));
+        assert!(startup_credential_ready(
+            SshAuthPreference::Password,
+            true,
+            false
+        ));
+        assert!(!startup_credential_ready(
+            SshAuthPreference::PrivateKey,
+            false,
+            false
+        ));
+        assert!(startup_credential_ready(
+            SshAuthPreference::PrivateKey,
+            false,
+            true
+        ));
+        assert!(startup_credential_ready(
+            SshAuthPreference::Agent,
+            false,
+            false
+        ));
+    }
 
     struct AuthFormTestView {
         form: SshAuthForm,

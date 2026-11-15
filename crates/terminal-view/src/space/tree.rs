@@ -73,11 +73,11 @@ pub(crate) struct SplitContext {
 }
 
 /// One node of the Space tree.
-pub(crate) enum SpaceNode {
+pub(crate) enum SpaceNode<T = Entity<TerminalView>> {
     /// A leaf Space — holds a terminal or is empty.
-    Leaf(SpaceLeaf),
+    Leaf(SpaceLeaf<T>),
     /// A split of two-or-more children along one axis.
-    Split(SpaceSplit),
+    Split(SpaceSplit<T>),
 }
 
 /// A leaf Space.
@@ -86,9 +86,9 @@ pub(crate) enum SpaceNode {
 /// handle both point at the same objects); [`split`](SpaceTree::split) uses it
 /// to re-seat a leaf under a freshly created split node.
 #[derive(Clone)]
-pub(crate) struct SpaceLeaf {
+pub(crate) struct SpaceLeaf<T = Entity<TerminalView>> {
     pub id: SpaceId,
-    pub content: SpaceContent,
+    pub content: SpaceContent<T>,
     /// Focus target for the empty placeholder (the terminal leaf uses the
     /// view's own focus handle instead).
     pub focus: FocusHandle,
@@ -96,35 +96,35 @@ pub(crate) struct SpaceLeaf {
 
 /// The content of a leaf Space.
 #[derive(Clone)]
-pub(crate) enum SpaceContent {
-    /// A live terminal view (local or SSH — both are `TerminalView`).
-    Terminal(Entity<TerminalView>),
+pub(crate) enum SpaceContent<T = Entity<TerminalView>> {
+    /// An owned terminal pane handle; tree mutations do not inspect its engine.
+    Terminal(T),
     /// Empty Space: renders a placeholder.
     Empty,
 }
 
 /// An internal split node: `children` laid out along `axis`, sharing `state`.
-pub(crate) struct SpaceSplit {
+pub(crate) struct SpaceSplit<T = Entity<TerminalView>> {
     /// Horizontal split = children laid out left→right (Split Right/Left).
     /// Vertical split = children laid out top→bottom (Split Up/Down).
     pub axis: Axis,
     /// Invariant: a split always has at least two children — `close` collapses
     /// a split into its last remaining child.
-    pub children: Vec<SpaceNode>,
+    pub children: Vec<SpaceNode<T>>,
     /// Sizes/handles for this split level (one entity per split node).
     pub state: Entity<ResizableState>,
 }
 
 /// The pane tree inside a `TerminalPanel`.
-pub(crate) struct SpaceTree {
-    root: SpaceNode,
+pub(crate) struct SpaceTree<T = Entity<TerminalView>> {
+    root: SpaceNode<T>,
     /// `SpaceId` allocator.
     next_id: u64,
     /// The active (focused) leaf.
     active: SpaceId,
 }
 
-impl SpaceTree {
+impl<T: Clone> SpaceTree<T> {
     /// Create a tree with a single empty leaf (no terminal session).
     pub(crate) fn new_empty(focus: FocusHandle) -> Self {
         // SpaceId(0) is reserved for a tab's initial terminal. This recovery
@@ -134,11 +134,11 @@ impl SpaceTree {
     }
 
     /// Create a tree with a single terminal leaf wrapping `view`.
-    pub(crate) fn new_terminal(view: Entity<TerminalView>, focus: FocusHandle) -> Self {
+    pub(crate) fn new_terminal(view: T, focus: FocusHandle) -> Self {
         Self::single(SpaceId(0), SpaceContent::Terminal(view), focus, 1)
     }
 
-    fn single(id: SpaceId, content: SpaceContent, focus: FocusHandle, next_id: u64) -> Self {
+    fn single(id: SpaceId, content: SpaceContent<T>, focus: FocusHandle, next_id: u64) -> Self {
         Self {
             root: SpaceNode::Leaf(SpaceLeaf { id, content, focus }),
             next_id,
@@ -154,7 +154,7 @@ impl SpaceTree {
     }
 
     /// The root node (for rendering and structure tests).
-    pub(crate) fn root(&self) -> &SpaceNode {
+    pub(crate) fn root(&self) -> &SpaceNode<T> {
         &self.root
     }
 
@@ -192,12 +192,27 @@ impl SpaceTree {
     }
 
     /// The active leaf's terminal view, if the active Space holds one.
-    pub(crate) fn active_terminal(&self) -> Option<Entity<TerminalView>> {
+    pub(crate) fn active_terminal(&self) -> Option<T> {
         self.leaf_terminal(self.active)
     }
 
+    /// A tab drag uses its active terminal, or its sole terminal when an
+    /// empty split is active. Multiple inactive terminals are ambiguous.
+    pub(crate) fn drag_terminal_space(&self) -> Option<SpaceId> {
+        if self.active_terminal().is_some() {
+            return Some(self.active);
+        }
+        let mut terminals = Vec::new();
+        self.root.collect_leaves(&mut |leaf| {
+            if matches!(leaf.content, SpaceContent::Terminal(_)) {
+                terminals.push(leaf.id);
+            }
+        });
+        (terminals.len() == 1).then(|| terminals[0])
+    }
+
     /// The terminal view held by leaf `id`, if any.
-    pub(crate) fn leaf_terminal(&self, id: SpaceId) -> Option<Entity<TerminalView>> {
+    pub(crate) fn leaf_terminal(&self, id: SpaceId) -> Option<T> {
         match &self.root.find_leaf(id)?.content {
             SpaceContent::Terminal(view) => Some(view.clone()),
             SpaceContent::Empty => None,
@@ -217,7 +232,7 @@ impl SpaceTree {
     }
 
     /// Every terminal view in the tree (used to (re)subscribe to title events).
-    pub(crate) fn terminal_views(&self) -> Vec<Entity<TerminalView>> {
+    pub(crate) fn terminal_views(&self) -> Vec<T> {
         let mut out = Vec::new();
         self.root.collect_leaves(&mut |leaf| {
             if let SpaceContent::Terminal(view) = &leaf.content {
@@ -234,10 +249,13 @@ impl SpaceTree {
 
     /// The focus handle for the active leaf: the terminal view's handle for a
     /// terminal leaf, or the placeholder's handle for an empty leaf.
-    pub(crate) fn active_focus_handle(&self, cx: &gpui::App) -> Option<FocusHandle> {
+    pub(crate) fn active_focus_handle(
+        &self,
+        terminal_focus: impl FnOnce(&T) -> FocusHandle,
+    ) -> Option<FocusHandle> {
         let leaf = self.root.find_leaf(self.active)?;
         Some(match &leaf.content {
-            SpaceContent::Terminal(view) => view.read(cx).focus.clone(),
+            SpaceContent::Terminal(view) => terminal_focus(view),
             SpaceContent::Empty => leaf.focus.clone(),
         })
     }
@@ -249,7 +267,7 @@ impl SpaceTree {
         &mut self,
         target: SpaceId,
         dir: SplitDir,
-        empty: SpaceLeaf,
+        empty: SpaceLeaf<T>,
         state: Entity<ResizableState>,
     ) {
         let new_id = empty.id;
@@ -261,10 +279,7 @@ impl SpaceTree {
     /// Close leaf `target`, collapsing the tree to keep it well-formed. Returns
     /// the removed terminal view (if the leaf held one) so the caller can close
     /// its session, plus the [`CloseOutcome`].
-    pub(crate) fn close(
-        &mut self,
-        target: SpaceId,
-    ) -> (CloseOutcome, Option<Entity<TerminalView>>) {
+    pub(crate) fn close(&mut self, target: SpaceId) -> (CloseOutcome, Option<T>) {
         if self.leaf_count() <= 1 {
             return (CloseOutcome::LastSpaceClosed, None);
         }
@@ -285,11 +300,7 @@ impl SpaceTree {
     /// Replace the empty content of leaf `target` with a terminal `view`, which
     /// becomes the active Space. On `Err` the target was missing or occupied
     /// and the view is handed back untouched (never leaked).
-    pub(crate) fn fill_empty(
-        &mut self,
-        target: SpaceId,
-        view: Entity<TerminalView>,
-    ) -> Result<(), Entity<TerminalView>> {
+    pub(crate) fn fill_empty(&mut self, target: SpaceId, view: T) -> Result<(), T> {
         if let Some(leaf) = self.root.find_leaf_mut(target)
             && matches!(leaf.content, SpaceContent::Empty)
         {
@@ -302,7 +313,7 @@ impl SpaceTree {
 
     /// Take the terminal view out of leaf `id`, leaving the leaf empty. Returns
     /// the removed view, or `None` if the leaf was already empty / missing.
-    pub(crate) fn take_leaf_terminal(&mut self, id: SpaceId) -> Option<Entity<TerminalView>> {
+    pub(crate) fn take_leaf_terminal(&mut self, id: SpaceId) -> Option<T> {
         let leaf = self.root.find_leaf_mut(id)?;
         match std::mem::replace(&mut leaf.content, SpaceContent::Empty) {
             SpaceContent::Terminal(view) => Some(view),
@@ -311,9 +322,9 @@ impl SpaceTree {
     }
 }
 
-impl SpaceNode {
+impl<T> SpaceNode<T> {
     /// Find the leaf with `id` in this subtree.
-    fn find_leaf(&self, id: SpaceId) -> Option<&SpaceLeaf> {
+    fn find_leaf(&self, id: SpaceId) -> Option<&SpaceLeaf<T>> {
         match self {
             SpaceNode::Leaf(leaf) => (leaf.id == id).then_some(leaf),
             SpaceNode::Split(split) => split.children.iter().find_map(|c| c.find_leaf(id)),
@@ -321,7 +332,7 @@ impl SpaceNode {
     }
 
     /// Find the leaf with `id` in this subtree (mutable).
-    fn find_leaf_mut(&mut self, id: SpaceId) -> Option<&mut SpaceLeaf> {
+    fn find_leaf_mut(&mut self, id: SpaceId) -> Option<&mut SpaceLeaf<T>> {
         match self {
             SpaceNode::Leaf(leaf) => (leaf.id == id).then_some(leaf),
             SpaceNode::Split(split) => split.children.iter_mut().find_map(|c| c.find_leaf_mut(id)),
@@ -350,7 +361,7 @@ impl SpaceNode {
     }
 
     /// Visit every leaf in this subtree in depth-first (left→right) order.
-    fn collect_leaves(&self, visit: &mut impl FnMut(&SpaceLeaf)) {
+    fn collect_leaves(&self, visit: &mut impl FnMut(&SpaceLeaf<T>)) {
         match self {
             SpaceNode::Leaf(leaf) => visit(leaf),
             SpaceNode::Split(split) => {
@@ -364,12 +375,12 @@ impl SpaceNode {
 
 /// Wrap leaf `target` in a new split node holding the payload's empty leaf.
 /// Returns the payload unused (`Err`) when `target` is not in this subtree.
-fn insert_split(
-    node: &mut SpaceNode,
+fn insert_split<T: Clone>(
+    node: &mut SpaceNode<T>,
     target: SpaceId,
     dir: SplitDir,
-    payload: (SpaceLeaf, Entity<ResizableState>),
-) -> Result<(), (SpaceLeaf, Entity<ResizableState>)> {
+    payload: (SpaceLeaf<T>, Entity<ResizableState>),
+) -> Result<(), (SpaceLeaf<T>, Entity<ResizableState>)> {
     match node {
         SpaceNode::Leaf(leaf) => {
             if leaf.id != target {
@@ -406,7 +417,7 @@ fn insert_split(
 /// Remove leaf `target` from this subtree and return its content. The root leaf
 /// itself is never removed (callers guard with `leaf_count > 1`), so a leaf is
 /// always removed by its parent split, which then collapses if one child is left.
-fn remove_leaf(node: &mut SpaceNode, target: SpaceId) -> Option<SpaceContent> {
+fn remove_leaf<T>(node: &mut SpaceNode<T>, target: SpaceId) -> Option<SpaceContent<T>> {
     let SpaceNode::Split(split) = node else {
         return None;
     };
@@ -433,7 +444,7 @@ fn remove_leaf(node: &mut SpaceNode, target: SpaceId) -> Option<SpaceContent> {
 }
 
 /// Replace a split that has exactly one child left with that child.
-fn collapse_single_child(node: &mut SpaceNode) {
+fn collapse_single_child<T>(node: &mut SpaceNode<T>) {
     let SpaceNode::Split(split) = node else {
         return;
     };

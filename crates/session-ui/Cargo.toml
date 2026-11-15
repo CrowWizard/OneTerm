@@ -9,6 +9,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [features]
+ghostty-native = ["oneterm-terminal/ghostty-native", "oneterm-terminal-view/ghostty-native"]
 # Profiling sites (IN-0046): with this feature off every
 # `#[cfg_attr(feature = "hotpath-profiling", hotpath::measure)]` vanishes and
 # `hotpath` is not in the graph. Only `oneterm-app` turns measuring on.

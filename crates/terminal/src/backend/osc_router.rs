@@ -325,6 +325,33 @@ impl<T: PtyTransport> OscRouter<T> {
         out.push(SessionEvent::Title(sanitized.unwrap_or_default()));
     }
 
+    #[cfg(feature = "ghostty-native")]
+    pub(crate) fn route_ghostty(
+        &self,
+        event: crate::ghostty::events::Event,
+        out: &mut Vec<SessionEvent>,
+    ) {
+        use crate::ghostty::events::Event;
+        match event {
+            Event::Title(title) => self.set_title(&title, out),
+            Event::Bell => out.push(SessionEvent::Bell),
+            Event::Clipboard(text) => self.store_clipboard(text, out),
+            Event::ClipboardRead => {
+                if self.security.allow_clipboard_read(self.clipboard_origin) {
+                    out.push(SessionEvent::ClipboardRead);
+                }
+            }
+            Event::WorkingDirectory(raw) => {
+                let decoded = ghostty_directory(&raw);
+                if let Some(path) = self.security.sanitize_cwd(&decoded) {
+                    let dir = std::path::PathBuf::from(path);
+                    self.state.lock().cwd = Some(dir.clone());
+                    out.push(SessionEvent::Cwd(dir));
+                }
+            }
+        }
+    }
+
     fn store_clipboard(&self, text: String, out: &mut Vec<SessionEvent>) {
         let Some(validated) = self
             .security
@@ -337,6 +364,37 @@ impl<T: PtyTransport> OscRouter<T> {
         self.state.lock().clipboard = Some(validated.clone());
         out.push(SessionEvent::Clipboard(Some(validated)));
     }
+}
+
+/// Same unresolved URI/path convention as the existing engine: discard URI
+/// authority, percent-decode, strip a Windows drive URL's leading slash. This
+/// never canonicalizes, probes a filesystem, or changes clipboard policy.
+#[cfg(feature = "ghostty-native")]
+fn ghostty_directory(raw: &str) -> String {
+    let path = match raw.strip_prefix("file://") {
+        Some(rest) => rest.find('/').map_or(rest, |offset| &rest[offset..]),
+        None => raw,
+    };
+    let mut bytes = Vec::with_capacity(path.len());
+    let mut source = path.as_bytes().iter().copied().peekable();
+    while let Some(byte) = source.next() {
+        if byte == b'%' {
+            let mut next = source.clone();
+            if let (Some(a), Some(b)) = (next.next(), next.next()) {
+                if let (Some(a), Some(b)) = ((a as char).to_digit(16), (b as char).to_digit(16)) {
+                    bytes.push((a * 16 + b) as u8);
+                    source = next;
+                    continue;
+                }
+            }
+        }
+        bytes.push(byte);
+    }
+    let path = String::from_utf8_lossy(&bytes);
+    let bytes = path.as_bytes();
+    let drive_slash =
+        bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b':';
+    path[usize::from(drive_slash)..].to_owned()
 }
 
 /// The reply the reference formatted inside the engine.

@@ -62,10 +62,8 @@ pub(super) fn apply_check_cache(cx: &mut App, cache: UpdateCheckCache) {
 
 fn persist_update_config(cx: &App) {
     if oneterm_core::elevation::is_restricted() {
-        // M4 (`DEC-0019`): `update_config.json` is never written from an
-        // elevated window. Unreachable under M2, which removes the surface that
-        // edits it, so this is belt and braces.
-        log::debug!("elevated window: not writing update_config.json");
+        // US-0259: only an unknown token refuses preference persistence.
+        log::debug!("unknown process token: not writing update_config.json");
         return;
     }
     let snapshot = entity(cx).read(cx).clone();
@@ -127,12 +125,21 @@ mod tests {
         );
         PersistQueue::drain(&queue, |_| {});
 
-        oneterm_core::elevation::set_elevation(oneterm_core::elevation::Elevation::Elevated);
+        oneterm_core::elevation::set_elevation(oneterm_core::elevation::Elevation::Unknown(
+            "test token query failure",
+        ));
         let _restricted = RestrictedElevation;
         cx.update(|cx| persist_update_config(cx));
         assert!(
             !PersistQueue::has_pending(&queue),
-            "an elevated window must queue no update_config.json write"
+            "an unknown token must queue no update_config.json write"
         );
+        oneterm_core::elevation::set_elevation(oneterm_core::elevation::Elevation::Elevated);
+        cx.update(|cx| persist_update_config(cx));
+        assert!(
+            PersistQueue::has_pending(&queue),
+            "confirmed administrators queue update preferences"
+        );
+        PersistQueue::drain(&queue, |_| {});
     }
 }

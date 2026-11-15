@@ -2,12 +2,13 @@
 //! around each Space, and the empty-Space placeholder (drop target + context menu).
 
 use gpui::{
-    AnyElement, App, Axis, Context, Div, ElementId, Entity, Hsla, InteractiveElement as _,
-    IntoElement, MouseButton, ParentElement as _, Role, StatefulInteractiveElement as _,
-    Styled as _, WeakEntity, Window, div, px,
+    AnyElement, App, Axis, Context, Div, ElementId, Entity, EntityId, Hsla,
+    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Render, Role,
+    StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, div, px,
 };
+use gpui::{Bounds, Pixels, Point, canvas, fill};
 use gpui_component::{
-    ActiveTheme as _, Icon, Sizable as _,
+    ActiveTheme as _, ElementExt as _, Icon, Sizable as _,
     dock::{ClosePanel, DragPanel},
     menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem},
     resizable::{h_resizable, resizable_panel, v_resizable},
@@ -15,13 +16,31 @@ use gpui_component::{
 };
 use oneterm_state::InputChannelRegistry;
 use oneterm_theme::icon::AppIcon;
+use std::cell::Cell;
+use std::rc::Rc;
 
-use super::tree::{SpaceContent, SpaceId, SpaceLeaf, SpaceNode, SpaceTree};
+use super::tree::{SpaceContent, SpaceId, SpaceLeaf, SpaceNode, SpaceTree, SplitDir};
 use crate::input::menu::split_items;
 use crate::panel::TerminalPanel;
 use crate::theme::{channel_chip, channel_color};
 
-impl SpaceTree {
+/// Layout depends on pane identity and rendering, not a particular engine.
+pub(crate) trait PaneView: Clone {
+    fn entity_id(&self) -> EntityId;
+    fn element(&self) -> AnyElement;
+}
+
+impl<V: Render + 'static> PaneView for Entity<V> {
+    fn entity_id(&self) -> EntityId {
+        Entity::entity_id(self)
+    }
+
+    fn element(&self) -> AnyElement {
+        self.clone().into_any_element()
+    }
+}
+
+impl<T: PaneView> SpaceTree<T> {
     /// Render the whole tree for `panel`. `channels` is the panel's registry
     /// handle - passed in because the panel is being rendered and cannot be
     /// read back to reach its own dependencies.
@@ -32,15 +51,16 @@ impl SpaceTree {
     pub(crate) fn render(
         &self,
         panel: WeakEntity<TerminalPanel>,
+        preview: Rc<Cell<Option<(SpaceId, SplitDir)>>>,
         channels: Option<&Entity<InputChannelRegistry>>,
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
         render_node(
             self.root(),
-            self.active(),
-            self.is_single(),
+            (self.active(), self.is_single()),
             panel,
+            preview,
             channels,
             window,
             cx,
@@ -50,18 +70,19 @@ impl SpaceTree {
 
 /// Render `node`. `single` is true when this is the tree's sole leaf (the
 /// plain-terminal fast path: no Space chrome).
-fn render_node(
-    node: &SpaceNode,
-    active: SpaceId,
-    single: bool,
+fn render_node<T: PaneView>(
+    node: &SpaceNode<T>,
+    state: (SpaceId, bool),
     panel: WeakEntity<TerminalPanel>,
+    preview: Rc<Cell<Option<(SpaceId, SplitDir)>>>,
     channels: Option<&Entity<InputChannelRegistry>>,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
+    let (active, single) = state;
     let split = match node {
         SpaceNode::Leaf(leaf) => {
-            return render_leaf(leaf, active, single, panel, channels, window, cx);
+            return render_leaf(leaf, (active, single), panel, preview, channels, window, cx);
         }
         SpaceNode::Split(split) => split,
     };
@@ -79,22 +100,31 @@ fn render_node(
     .with_state(&split.state);
 
     for child in &split.children {
-        let el = render_node(child, active, false, panel.clone(), channels, window, cx);
+        let el = render_node(
+            child,
+            (active, false),
+            panel.clone(),
+            preview.clone(),
+            channels,
+            window,
+            cx,
+        );
         group = group.child(resizable_panel().child(el));
     }
     group.into_any_element()
 }
 
 /// Render a single leaf Space.
-fn render_leaf(
-    leaf: &SpaceLeaf,
-    active: SpaceId,
-    single: bool,
+fn render_leaf<T: PaneView>(
+    leaf: &SpaceLeaf<T>,
+    state: (SpaceId, bool),
     panel: WeakEntity<TerminalPanel>,
+    preview: Rc<Cell<Option<(SpaceId, SplitDir)>>>,
     channels: Option<&Entity<InputChannelRegistry>>,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
+    let (active, single) = state;
     let id = leaf.id;
     let channel = match (&leaf.content, channels) {
         (SpaceContent::Terminal(view), Some(registry)) => {
@@ -119,7 +149,74 @@ fn render_leaf(
             .right(px(5.))
     });
     let content: AnyElement = match &leaf.content {
-        SpaceContent::Terminal(view) => view.clone().into_any_element(),
+        SpaceContent::Terminal(view) => {
+            let bounds = Rc::new(Cell::new(Bounds::<Pixels>::default()));
+            let measured = bounds.clone();
+            let drop_panel = panel.clone();
+            let preview_panel = panel.clone();
+            let shown = preview.clone();
+            let moving = preview.clone();
+            let color = cx.theme().tokens.drop_target;
+            div()
+                .id(("space-drop", id.0 as usize))
+                .relative()
+                .size_full()
+                .debug_selector(move || format!("space-drop-{}", id.0))
+                .on_prepaint(move |bounds, _, _| measured.set(bounds))
+                .on_drag_move(move |event: &gpui::DragMoveEvent<DragPanel>, window, cx| {
+                    let valid = preview_panel.upgrade().is_some_and(|target| {
+                        TerminalPanel::dragged_by(event.drag(cx), cx).is_some_and(|source| {
+                            source != target && source.read(cx).can_drag_terminal()
+                        })
+                    });
+                    if valid && event.bounds.contains(&event.event.position) {
+                        moving.set(Some((
+                            id,
+                            split_direction(event.bounds, event.event.position),
+                        )));
+                    } else if moving.get().is_some_and(|(space, _)| space == id) {
+                        moving.set(None);
+                    }
+                    window.refresh();
+                })
+                .on_drop(move |drag: &DragPanel, window, cx| {
+                    let direction = split_direction(bounds.get(), window.mouse_position());
+                    if let Some(panel) = drop_panel.upgrade() {
+                        panel.update(cx, |panel, cx| {
+                            panel.handle_split_drop(id, direction, drag, window, cx)
+                        });
+                    }
+                })
+                .child(view.element())
+                .child(
+                    canvas(
+                        move |bounds, window, cx| {
+                            let (space, direction) = shown.get()?;
+                            if !cx.has_active_drag()
+                                || space != id
+                                || !bounds.contains(&window.mouse_position())
+                            {
+                                return None;
+                            }
+                            Some(split_preview_bounds(bounds, direction))
+                        },
+                        move |_, preview, window, _| {
+                            if let Some(bounds) = preview {
+                                window.paint_quad(fill(bounds, color));
+                            }
+                        },
+                    )
+                    .absolute()
+                    .inset_0(),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .debug_selector(|| "terminal-split-target".to_string()),
+                )
+                .into_any_element()
+        }
         SpaceContent::Empty => render_placeholder(leaf, panel.clone(), window, cx),
     };
 
@@ -188,6 +285,40 @@ fn active_cue_ring(color: Hsla) -> Div {
     div().absolute().inset_0().border_2().border_color(color)
 }
 
+/// Choose the nearest edge in normalized coordinates, independent of aspect ratio.
+fn split_direction(bounds: Bounds<Pixels>, pointer: Point<Pixels>) -> SplitDir {
+    let x = (pointer.x - bounds.left()) / bounds.size.width.max(px(1.));
+    let y = (pointer.y - bounds.top()) / bounds.size.height.max(px(1.));
+    [
+        (x, SplitDir::Left),
+        (1. - x, SplitDir::Right),
+        (y, SplitDir::Up),
+        (1. - y, SplitDir::Down),
+    ]
+    .into_iter()
+    .min_by(|a, b| a.0.total_cmp(&b.0))
+    .unwrap()
+    .1
+}
+
+fn split_preview_bounds(mut bounds: Bounds<Pixels>, direction: SplitDir) -> Bounds<Pixels> {
+    match direction {
+        SplitDir::Left | SplitDir::Right => {
+            bounds.size.width *= 0.5;
+            if direction == SplitDir::Right {
+                bounds.origin.x += bounds.size.width;
+            }
+        }
+        SplitDir::Up | SplitDir::Down => {
+            bounds.size.height *= 0.5;
+            if direction == SplitDir::Down {
+                bounds.origin.y += bounds.size.height;
+            }
+        }
+    }
+    bounds
+}
+
 /// The 1px frame color of a Space. Only the active Space is highlighted: in
 /// its `channel` colour when it is a member, in the theme's active colour
 /// otherwise. Every inactive Space keeps the plain border; the badge alone
@@ -218,8 +349,8 @@ fn activate_space(
 /// Render the empty-Space placeholder: centered hint text, a drop target for the dock's
 /// `DragPanel` of a terminal tab (a strip tab, a rail row or a collapsed cell), and its own
 /// context menu.
-fn render_placeholder(
-    leaf: &SpaceLeaf,
+fn render_placeholder<T>(
+    leaf: &SpaceLeaf<T>,
     panel: WeakEntity<TerminalPanel>,
     _window: &mut Window,
     cx: &mut App,
@@ -270,16 +401,17 @@ fn render_placeholder(
                 let _ = panel.update(cx, |p, cx| p.handle_panel_drop(id, drag, window, cx));
             }
         })
-        .context_menu(move |menu, _window, cx| placeholder_menu(menu, panel.clone(), id, cx))
+        .context_menu(move |menu, window, cx| placeholder_menu(menu, panel.clone(), id, window, cx))
         .into_any_element()
 }
 
-/// The empty-Space context menu: New Terminal Here, the four Split items,
+/// The empty-Space context menu: New Terminal Here, New SSH Here, the four Split items,
 /// Close Terminal Tab, and Close Space (only with a sibling Space).
 fn placeholder_menu(
     menu: PopupMenu,
     panel: WeakEntity<TerminalPanel>,
     space_id: SpaceId,
+    window: &mut Window,
     cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
     let can_close_space = panel
@@ -293,6 +425,7 @@ fn placeholder_menu(
             let _ = panel.update(cx, |p, cx| p.new_terminal_here(space_id, window, cx));
         }
     }));
+    let menu = crate::input::menu::ssh_here_submenu(menu, panel.clone(), space_id, window, cx);
     let mut menu = split_items(menu, panel.clone(), space_id, None, false)
         .separator()
         // Close Terminal Tab — closes the whole tab (all Spaces).
@@ -317,6 +450,39 @@ mod tests {
     use gpui::hsla;
 
     use super::space_border_color;
+
+    #[test]
+    fn preview_geometry_matches_each_direction() {
+        use super::{SplitDir, split_direction, split_preview_bounds};
+        use gpui::{Bounds, point, px, size};
+        let bounds = Bounds::new(point(px(10.), px(20.)), size(px(800.), px(400.)));
+        for (x, y, dir) in [
+            (0.1, 0.5, SplitDir::Left),
+            (0.9, 0.5, SplitDir::Right),
+            (0.5, 0.1, SplitDir::Up),
+            (0.5, 0.9, SplitDir::Down),
+        ] {
+            let pointer = point(
+                bounds.left() + bounds.size.width * x,
+                bounds.top() + bounds.size.height * y,
+            );
+            assert_eq!(split_direction(bounds, pointer), dir);
+            let preview = split_preview_bounds(bounds, dir);
+            assert!(preview.contains(&pointer));
+            assert_eq!(
+                (preview.size.width / bounds.size.width)
+                    * (preview.size.height / bounds.size.height),
+                0.5
+            );
+        }
+    }
+
+    #[cfg(feature = "ghostty-native")]
+    #[test]
+    fn shared_renderer_accepts_native_surface_entity_without_legacy_view() {
+        fn accepts_pane<T: super::PaneView>() {}
+        accepts_pane::<gpui::Entity<crate::NativeTerminalSurface>>();
+    }
 
     #[test]
     fn selected_space_uses_active_gutter_color() {

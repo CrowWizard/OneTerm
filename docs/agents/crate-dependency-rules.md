@@ -37,6 +37,13 @@ diagnostics: DOOM-fire workload, raw PTY throughput probe, VT parity and bench h
 workspace member **outside** the layering: nothing depends on it, and it may only reach down to the
 L0 leaves — today `vt` and, since `US-0135`'s `highlight-bench`, `highlight`.
 
+`US-0208` stages the accepted Ghostty migration under the explicit default-off
+`oneterm-terminal/ghostty-native` feature. This adds no Rust crate dependency and
+does not change the shipping engine: it links only the pinned project-local
+Windows native artifact for boundary validation. R7's gpui-free/no-transport
+constraints and the external `oneterm-vt` contract still apply. Neither backend
+may feed production output to both engines.
+
 ## Invariants
 
 | # | Rule | Rationale | How to verify |

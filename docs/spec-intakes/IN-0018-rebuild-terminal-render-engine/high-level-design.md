@@ -94,6 +94,17 @@ the contract).
 
 ## Data Flow
 
+US-0249 staging amendment (2026-11-13): SpaceTree and its nodes now parameterize
+the cloneable terminal handle; the existing Entity<TerminalView> is the default.
+Split/fill/take/close preserve that handle, focus resolution is caller-supplied,
+and the same Space renderer accepts render entities by identity and element.
+NativeTerminalSurface ownership has a focused proof through this shared tree.
+TerminalPanel now stores a tagged legacy/native pane handle and accepts explicit
+native sessions while sharing this tree and renderer. Native panes own reliable
+event draining and an observable consuming-close result independently of paint.
+The production factory/startup remains unchanged; this amendment does not claim
+a completed native workspace or alter the behavior-parity requirements.
+
 1. `TerminalPanel::open(PanelSpec)` spawns or wraps a `Box<dyn TerminalSession>`, wraps it in an
    `Entity`, and creates `TerminalView::new(session, TerminalDeps, window, cx)`.
 2. `TerminalView::new` takes the session's event receiver once and runs the **events pump**

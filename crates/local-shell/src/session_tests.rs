@@ -10,6 +10,7 @@ use oneterm_terminal::{
 };
 
 use crate::session::{LocalSession, quote_windows_argument};
+use crate::spawn_guard::lock_spawns;
 use oneterm_core::AppError;
 use oneterm_terminal::{PtySession, PtySize};
 
@@ -87,23 +88,7 @@ fn snapshot_lines(session: &PtySession<LocalSession>) -> Vec<String> {
         .collect()
 }
 
-/// Serialises every real-shell spawn in this test binary.
-///
-/// `session_orphan_tests` works out which processes belong to its session by
-/// diffing this process's children around the spawn. Another test's shell
-/// starting inside that window would be adopted by the probe, waited out for
-/// `LIVENESS_BOUND` and then terminated — failing the probe and very likely the
-/// innocent test too. So every spawn here takes this lock, and the probe holds
-/// it across both of its snapshots.
-pub(super) static SPAWN_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-pub(super) fn lock_spawns() -> std::sync::MutexGuard<'static, ()> {
-    SPAWN_GUARD
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-/// Spawn `cfg` while holding [`SPAWN_GUARD`].
+/// Spawn `cfg` while holding the shared real-child spawn guard.
 fn spawn_guarded(
     cfg: oneterm_core::LocalShellConfig,
 ) -> Result<PtySession<LocalSession>, AppError> {
@@ -111,7 +96,7 @@ fn spawn_guarded(
     spawn_unguarded(cfg)
 }
 
-/// Spawn `cfg`. The caller must already hold [`SPAWN_GUARD`].
+/// Spawn `cfg`. The caller must already hold the shared real-child spawn guard.
 pub(super) fn spawn_unguarded(
     cfg: oneterm_core::LocalShellConfig,
 ) -> Result<PtySession<LocalSession>, AppError> {

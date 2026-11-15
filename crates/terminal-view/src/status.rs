@@ -75,8 +75,6 @@ pub fn find_in_active_terminal(dock_area: &Entity<DockArea>, window: &mut Window
         return;
     };
     panel.update(cx, |tp, cx| {
-        if let Some(view) = tp.active_view() {
-            view.update(cx, |v, cx| v.toggle_search(window, cx));
-        }
+        tp.toggle_search(window, cx);
     });
 }

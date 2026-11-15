@@ -9,19 +9,19 @@
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use gpui::{App, AppContext as _, Context, Entity, Window};
+use gpui::{App, AppContext as _, Context, Window};
 use gpui_component::WindowExt as _;
 use gpui_component::notification::NotificationType;
 
 use oneterm_core::{LocalShellConfig, SessionDuplicateConfig};
 use oneterm_state::commands::SshDuplicateCompletion;
-use oneterm_terminal::TerminalSession;
+use oneterm_terminal::CreatedSession;
 use oneterm_theme::notif_ext::notify;
 
+use super::pane::TerminalPane;
 use super::terminal_panel::DEFAULT_TAB_TITLE;
 use super::{PanelSpec, TerminalPanel};
 use crate::space::{SpaceId, SplitDir};
-use crate::terminal_view::TerminalView;
 
 /// User-facing message when a duplicate's destination disappeared before the
 /// session could be installed.
@@ -37,17 +37,15 @@ pub(crate) enum DuplicateDestination {
 
 /// A connected session waiting to be installed somewhere.
 struct DuplicatedSession {
-    session: Box<dyn TerminalSession>,
+    session: CreatedSession,
     title: String,
     duplicate_config: SessionDuplicateConfig,
 }
 
 /// A terminal that could not be installed into its destination.
 pub(super) enum Unplaced {
-    /// A raw session that never got a view.
-    Session(Box<dyn TerminalSession>),
     /// A view whose target Space stopped being empty.
-    View(Entity<TerminalView>),
+    View(TerminalPane),
 }
 
 /// Release an unplaced terminal (close the session / shut the view down) and
@@ -60,12 +58,7 @@ pub(super) fn close_unplaced(
     cx: &mut App,
 ) {
     match unplaced {
-        Unplaced::Session(session) => {
-            if let Err(error) = session.close() {
-                log::warn!("close_unplaced: failed to close unplaced session: {error}");
-            }
-        }
-        Unplaced::View(view) => view.update(cx, |view, cx| view.shutdown(cx)),
+        Unplaced::View(view) => view.shutdown(cx),
     }
     window.push_notification(notify(kind, message, cx), cx);
 }
@@ -81,6 +74,34 @@ fn apply_duplicate_cwd(
 }
 
 impl TerminalPanel {
+    /// Completion shared by New SSH Here and asynchronous placement.
+    pub(crate) fn ssh_here_completion(
+        panel: gpui::WeakEntity<Self>,
+        space_id: SpaceId,
+    ) -> SshDuplicateCompletion {
+        Rc::new(move |session, title, duplicate_config, window, cx| {
+            let Some(panel) = panel.upgrade() else {
+                crate::close_unplaced_session_in_workspace(session, cx);
+                window
+                    .push_notification(notify(NotificationType::Warning, DESTINATION_GONE, cx), cx);
+                return;
+            };
+            panel.update(cx, |panel, cx| {
+                panel.place_duplicate_session(
+                    DuplicatedSession {
+                        session,
+                        title,
+                        duplicate_config,
+                    },
+                    space_id,
+                    DuplicateDestination::ExistingSpace(space_id),
+                    window,
+                    cx,
+                );
+            });
+        })
+    }
+
     /// Create a new tab from the session in `space_id` without changing the source.
     pub(crate) fn duplicate_session(
         &mut self,
@@ -102,10 +123,9 @@ impl TerminalPanel {
         let Some(view) = self.tree.leaf_terminal(space_id) else {
             return;
         };
-        let (duplicate_config, live_cwd) = {
-            let view = view.read(cx);
-            (view.duplicate_config.clone(), view.session.read(cx).cwd())
-        };
+        #[cfg(feature = "ghostty-native")]
+        let native = matches!(view, TerminalPane::Native(_));
+        let (duplicate_config, live_cwd) = { (view.duplicate_config(cx), view.cwd(cx)) };
         let Some(duplicate_config) = duplicate_config else {
             window.push_notification(
                 notify(
@@ -121,7 +141,20 @@ impl TerminalPanel {
         match duplicate_config {
             SessionDuplicateConfig::Local(config) => {
                 let config = apply_duplicate_cwd(config, live_cwd);
-                let session = match Self::spawn_local_session(&self.deps, config.clone(), cx) {
+                let mut create = || {
+                    Self::spawn_local_session(&self.deps, config.clone(), cx)
+                        .map(CreatedSession::Legacy)
+                };
+                #[cfg(feature = "ghostty-native")]
+                let session = if native {
+                    Self::spawn_native_local_session(&self.deps, config.clone(), cx)
+                        .map(CreatedSession::Native)
+                } else {
+                    create()
+                };
+                #[cfg(not(feature = "ghostty-native"))]
+                let session = create();
+                let session = match session {
                     Ok(session) => session,
                     Err(error) => {
                         window.push_notification(
@@ -154,11 +187,9 @@ impl TerminalPanel {
                 let completion: SshDuplicateCompletion =
                     Rc::new(move |session, label, duplicate_config, window, cx| {
                         let Some(panel) = panel.upgrade() else {
-                            close_unplaced(
-                                Unplaced::Session(session),
-                                NotificationType::Warning,
-                                DESTINATION_GONE,
-                                window,
+                            crate::close_unplaced_session_in_workspace(session, cx);
+                            window.push_notification(
+                                notify(NotificationType::Warning, DESTINATION_GONE, cx),
                                 cx,
                             );
                             return;
@@ -207,8 +238,8 @@ impl TerminalPanel {
                     .and_then(|tabs| tabs.upgrade())
                     .is_none()
                 {
-                    close_unplaced(
-                        Unplaced::Session(session),
+                    self.close_duplicate_session(
+                        session,
                         NotificationType::Error,
                         "The terminal tab container is unavailable.",
                         window,
@@ -216,23 +247,28 @@ impl TerminalPanel {
                     );
                     return;
                 }
-                let panel = TerminalPanel::open(
-                    PanelSpec::Session {
+                let spec = match session {
+                    CreatedSession::Legacy(session) => PanelSpec::Session {
                         session,
                         title,
                         duplicate_config: Some(duplicate_config),
                     },
-                    window,
-                    cx,
-                );
+                    #[cfg(feature = "ghostty-native")]
+                    CreatedSession::Native(session) => PanelSpec::NativeSession {
+                        session,
+                        title,
+                        duplicate_config: Some(duplicate_config),
+                    },
+                };
+                let panel = TerminalPanel::open(spec, window, cx);
                 Self::add_tab_to_dock(panel, window, cx);
                 return;
             }
             DuplicateDestination::ExistingSpace(target) => target,
             DuplicateDestination::Split(dir) => {
                 if self.tree.leaf_terminal(source_space).is_none() {
-                    close_unplaced(
-                        Unplaced::Session(session),
+                    self.close_duplicate_session(
+                        session,
                         NotificationType::Warning,
                         DESTINATION_GONE,
                         window,
@@ -244,8 +280,35 @@ impl TerminalPanel {
             }
         };
 
-        let session = cx.new(|_| session);
-        let view = Self::new_view(&self.deps, session, Some(duplicate_config), window, cx);
+        let view = match session {
+            CreatedSession::Legacy(session) => {
+                let session = cx.new(|_| session);
+                TerminalPane::Legacy(Self::new_view(
+                    &self.deps,
+                    session,
+                    Some(duplicate_config),
+                    window,
+                    cx,
+                ))
+            }
+            #[cfg(feature = "ghostty-native")]
+            CreatedSession::Native(session) => {
+                let Some(view) =
+                    Self::new_native_view(&self.deps, session, Some(duplicate_config), window, cx)
+                else {
+                    window.push_notification(
+                        notify(
+                            NotificationType::Error,
+                            "Native duplicate event receiver is unavailable.",
+                            cx,
+                        ),
+                        cx,
+                    );
+                    return;
+                };
+                view
+            }
+        };
         if let Err(view) = self.place_view(target, view, window, cx) {
             close_unplaced(
                 Unplaced::View(view),
@@ -255,6 +318,18 @@ impl TerminalPanel {
                 cx,
             );
         }
+    }
+
+    fn close_duplicate_session(
+        &self,
+        session: CreatedSession,
+        kind: NotificationType,
+        message: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        crate::close_unplaced_session_in_workspace(session, cx);
+        window.push_notification(notify(kind, message, cx), cx);
     }
 }
 

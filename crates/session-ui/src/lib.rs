@@ -18,7 +18,9 @@ mod tree_builder;
 mod tree_render;
 
 pub use panel::SessionPanel;
-pub use quick_connect_dialog::{open_duplicate_ssh_dialog, open_quick_connect_dialog};
+pub use quick_connect_dialog::{
+    open_duplicate_ssh_dialog, open_quick_connect_dialog, open_quick_connect_to,
+};
 pub use session_state::{
     JumpChainError, SshAuthPreference, SshSession, SshSessionEntry, SshSessionId, SshSessionStore,
 };
@@ -51,13 +53,11 @@ pub fn saved_ssh_sessions(cx: &App) -> oneterm_state::commands::SavedSshSessionS
 /// the same reason `saved_ssh_sessions` does: the reverse crate edge is a cycle
 /// (`US-0114`).
 pub fn open_new_saved_session_dialog(window: &mut Window, cx: &mut App) {
-    if elevated_window_offers_no_ssh("new_ssh_session") {
-        return;
-    }
     session_dialog::open_session_dialog(window, cx, None, false);
 }
 
-/// M1 (`DEC-0019`): an elevated window has no SSH surface at all.
+/// Unknown token status still denies network entry points; confirmed administrator
+/// windows may open connections without modifying stored sessions.
 ///
 /// The guard sits on this crate's **public entry points** — the ones
 /// `WorkspaceCommands` holds pointers to — rather than on each caller, so a menu
@@ -84,6 +84,46 @@ pub fn open_saved_ssh_session(id: u64, window: &mut Window, cx: &mut App) {
     let id = SshSessionId::from_raw(id);
     if let Some(session) = SshSessionStore::global(cx).read(cx).get(id).cloned() {
         connect_dialog::open_connect_dialog(session, id, window, cx);
+    }
+}
+
+/// Open existing saved authentication while retaining a captured destination.
+pub fn open_saved_ssh_session_to(
+    id: u64,
+    completion: oneterm_state::commands::SshDuplicateCompletion,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if elevated_window_offers_no_ssh("open_session") {
+        return;
+    }
+    let id = SshSessionId::from_raw(id);
+    if let Some(session) = SshSessionStore::global(cx).read(cx).get(id).cloned() {
+        connect_dialog::open_connect_dialog_to(session, id, completion, window, cx);
+    }
+}
+
+/// Connect once to the optional default saved session after the main Root is ready.
+/// Elevated shell launches never automatically consume ordinary configuration.
+pub fn connect_startup_session(window: &mut Window, cx: &mut App) {
+    if oneterm_core::elevation::is_restricted() {
+        return;
+    }
+    let store = SshSessionStore::global(cx);
+    let Some(id) = store.read(cx).startup_session_id() else {
+        return;
+    };
+    let session = store.read(cx).get(id).cloned();
+    match session {
+        Some(session) => connect_dialog::open_startup_connect_dialog(session, id, window, cx),
+        None => {
+            use gpui_component::WindowExt as _;
+            window.push_notification(oneterm_theme::notif_ext::notify(
+                gpui_component::notification::NotificationType::Warning,
+                format!("The startup SSH session ({id}) no longer exists. Select another session's Connect on Startup option."),
+                cx,
+            ), cx);
+        }
     }
 }
 

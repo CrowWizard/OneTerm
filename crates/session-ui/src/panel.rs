@@ -58,6 +58,9 @@ pub(crate) fn confirm_delete_session(
     window: &mut Window,
     cx: &mut App,
 ) {
+    if !oneterm_actions::action_allowed_when_elevated("delete_session") {
+        return;
+    }
     let Some(label) = store.read(cx).get(id).map(|s| s.label.clone()) else {
         return;
     };

@@ -21,7 +21,7 @@ use super::frame::{Fnv1a, Frame, GridSize};
 use super::glyphs::{FontSet, GlyphCache};
 use super::graphics::GraphicStore;
 use super::metrics::{CellMetrics, GridGeometry, measure};
-use super::overlay::{RowSpan, SearchHighlight, SearchRect, search_rects, selection_rects};
+use super::overlay::{RowSpan, SearchHighlight, SearchRect, search_rects};
 use super::plan_cache::{PlanCache, StyleKey};
 use super::row_plan::{PlanContext, Scratch};
 use super::shapes::CellSizeDevicePx;
@@ -61,6 +61,8 @@ pub(crate) struct RenderInputs {
     pub gutter: GutterInputs,
     /// Viewport-clamped search matches; the view refills it in place.
     pub search: Vec<SearchHighlight>,
+    #[cfg(feature = "ghostty-native")]
+    pub native_search: Option<(oneterm_terminal::ghostty::search::Snapshot, Option<usize>)>,
     pub semantic: SemanticOverlay,
     /// Pointer over a URL: the mouse cursor becomes a hand.
     pub url_hovering: bool,
@@ -84,6 +86,8 @@ impl RenderInputs {
             },
             gutter: GutterInputs::default(),
             search: Vec::new(),
+            #[cfg(feature = "ghostty-native")]
+            native_search: None,
             semantic: SemanticOverlay::new(oneterm_highlight::ShellProfile::Unix, false),
             url_hovering: false,
         }
@@ -250,7 +254,7 @@ impl RenderState {
         // `DECSCNM` is a screen-level flag the engine reports and the renderer
         // honours by swapping what the two defaults resolve to; it belongs to
         // the frame rather than to the settings, so it is stamped in here.
-        let reverse_video = self.frame.modes().reverse_video;
+        let reverse_video = self.frame.reverse_video();
         let style_key = StyleKey {
             reverse_video,
             ..self.inputs.style_key()
@@ -282,10 +286,7 @@ impl RenderState {
     /// Selection and search spans for the snapshotted frame.
     pub(crate) fn compute_overlays(&mut self) {
         let size = self.frame.size();
-        self.overlays.selection.clear();
-        if let Some(selection) = self.frame.selection() {
-            selection_rects(selection, size, &mut self.overlays.selection);
-        }
+        self.frame.selection_spans(&mut self.overlays.selection);
         search_rects(&self.inputs.search, size, &mut self.overlays.search);
     }
 
@@ -352,10 +353,13 @@ impl RenderState {
     pub(crate) fn build_gutter_labels(
         &mut self,
         rows: usize,
-        display_offset: usize,
+        display_offset: Option<usize>,
         window: &Window,
     ) {
         self.gutter.labels.clear();
+        let Some(display_offset) = display_offset else {
+            return;
+        };
         if !self.inputs.show_gutter {
             return;
         }

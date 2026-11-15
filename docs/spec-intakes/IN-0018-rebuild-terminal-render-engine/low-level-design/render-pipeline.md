@@ -300,8 +300,9 @@ turned on; `FontConfig::ligatures` defaults to on, so the default setting never 
 path); every byte of the run in 0x20..=0x7E (no control char, no combining mark, no non-ASCII
 char); and the font's `AsciiGlyphs` table exists. With `calt = 0`, DirectWrite still applies
 `liga`, `clig` (GPUI turns them on), `kern` and the required `ccmp`, `locl`, `rlig` and
-`rclt`, any of which can rewrite an ASCII context (Fira Code's `ccmp` turns a backtick after
-`A-Z` or a backtick into `grave.case`). So the table is read once per `FontKey` by shaping one
+`rclt`, any of which can rewrite an ASCII context (some Fira Code versions' `ccmp` turns a
+backtick after `A-Z` or a backtick into `grave.case`; version 1.207 lacks that feature).
+So the table is read once per `FontKey` by shaping one
 reference line with `layout_line`: every ordered pair of the 95 printable chars (an order-2
 de Bruijn walk, 9,026 chars), then longer ligature probes (`ffi ffl === !== <=> ==> <!-- -->
 ::= ... www`); about 2-3 ms per font variant, once. It is kept only if the hand-built layout of
@@ -309,8 +310,9 @@ that same line equals GPUI's field by field: one `ShapedRun` (no fallback face),
 byte with `index` = byte, the same glyph id for a char in every context, `x` = the accumulated
 constant advance, `y` = 0, no emoji, same width, ascent and descent. A fallback face, a
 contextual substitution, kerning or a proportional advance fails the check **when the
-reference exhibits it**; then the font keeps shaping (Fira Code, Segoe UI, Lucida Console's
-simulated bold). What stays unproven: contexts longer than two chars other than the probes
+reference exhibits it**; then the font keeps shaping (contextual Fira Code versions,
+Segoe UI, Lucida Console's simulated bold). There is no family-name denylist.
+What stays unproven: contexts longer than two chars other than the probes
 (an independent probe of 35,937 punctuation triples and long random lines found none, which is
 evidence, not proof), and `locl` rules of a locale other than the one the check ran under (the
 check shapes with the current user locale, so such rules are covered only for pairs, only
@@ -321,8 +323,9 @@ copied line for line and re-diffed on every `gpui-pre` bump (`docs/agents/depend
 clears the cache. DirectWrite returns trailing whitespace as a second `ShapedRun` where the
 fast path returns one run with the same glyphs and width; the painter walks every run, so no
 consumer may assume run parity. Proof: `ascii_fast_path_matches_directwrite` (Windows, real
-DirectWrite: Lilex, Consolas, Courier New, forced and unforced; Fira Code rejected where
-installed), `ascii_check_rejects_a_contextual_rule`, `reference_walks_every_ordered_printable_pair`
+DirectWrite: Lilex, Consolas, Courier New, forced and unforced; installed Fira Code variants
+have exact parity on either path, and an independently witnessed backtick substitution
+requires rejection), `ascii_check_rejects_a_contextual_rule`, `reference_walks_every_ordered_printable_pair`
 and `ascii_fast_path_falls_through_to_the_shaper`.
 
 ### Element (`element.rs`)
@@ -378,6 +381,17 @@ Grid pass, per row `r` in `visible_rows` (`row_top = origin.y + r * line_height`
    `clock_fg` for the first 11 bytes and `line_number_fg` after
 
 Cursor pass (`cursor.rs`):
+
+Native workspace binding (`US-0249`) supplies the same live CursorConfig shape
+and explicit color overrides as legacy views. Native visibility/position still
+gate resolution before configuration can override shape, and published native
+steady cursors ignore blink-off phase. A weak surface-owned timer uses the
+shared 500 ms grid, toggles only focused/running/visible blinking native cursors
+when the live setting enables blink, and resets visible phase otherwise.
+Focus/blur resets phase. Unbound native surfaces retain native shape/color and
+no timer. The native surface owns no extra session reference through the timer;
+release cancels it. No legacy snapshot, backend cursor mutation or persisted
+setting change is needed for this binding.
 
 ```rust
 pub(crate) struct CursorConfig { shape: Option<CursorShape> /* override */, color: Option<Hsla>, focused: bool, blink_visible: bool }

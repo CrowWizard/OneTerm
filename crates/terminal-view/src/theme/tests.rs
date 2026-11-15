@@ -56,13 +56,99 @@ mod tests {
     }
 
     #[test]
+    fn ansi_defaults_follow_theme_base_colors_and_bright_ink() {
+        let mut theme = gpui_component::Theme::default();
+        let c = &mut theme.colors;
+        c.background = gpui::rgb(0x102030).into();
+        c.foreground = gpui::rgb(0xb0c0d0).into();
+        c.muted_foreground = gpui::rgb(0x607080).into();
+        c.red = gpui::rgb(0x804040).into();
+        c.green = gpui::rgb(0x408040).into();
+        c.yellow = gpui::rgb(0x808040).into();
+        c.blue = gpui::rgb(0x404080).into();
+        c.magenta = gpui::rgb(0x804080).into();
+        c.cyan = gpui::rgb(0x408080).into();
+        // UI light tokens are surface variants, not ANSI bright ink.
+        c.blue_light = gpui::rgba(0x01020322).into();
+        c.magenta.a = 0.5;
+        let normal = [
+            c.background,
+            c.red,
+            c.green,
+            c.yellow,
+            c.blue,
+            c.magenta,
+            c.cyan,
+            c.foreground,
+        ];
+        let terminal = build_terminal_theme(&theme);
+        for (index, color) in normal.into_iter().enumerate() {
+            let opaque = theme.colors.background.blend(color);
+            assert_eq!(terminal.palette.ansi[index], rgb_from_rgba(opaque.to_rgb()));
+            let bright = if index == 0 {
+                theme.colors.muted_foreground
+            } else {
+                Hsla {
+                    l: opaque.l + (1.0 - opaque.l) * 0.2,
+                    ..opaque
+                }
+            };
+            assert_eq!(
+                terminal.palette.ansi[index + 8],
+                rgb_from_rgba(bright.to_rgb())
+            );
+            assert_eq!(
+                terminal.color(FrameColor::Ansi(index as u8)),
+                hsla_from_rgb(terminal.palette.ansi[index])
+            );
+            assert_eq!(
+                terminal.color(FrameColor::Indexed((index + 8) as u8)),
+                hsla_from_rgb(terminal.palette.ansi[index + 8])
+            );
+        }
+        assert!(terminal.palette.indexed.iter().all(Option::is_none));
+    }
+
+    #[gpui::test]
+    fn ansi_alduin_uses_embedded_theme_not_tango(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            let mut registry = gpui_component::ThemeRegistry::default();
+            registry
+                .load_themes_from_str(include_str!("../../../theme/themes/alduin.json"))
+                .unwrap();
+            let config = registry.themes().get("Alduin").unwrap().clone();
+            let mut theme = gpui_component::Theme::default();
+            theme.apply_config(&config);
+            let terminal = build_terminal_theme(&theme);
+            for (index, expected) in [
+                (1, 0x8b5f61),
+                (2, 0x7a875f),
+                (3, 0x9d906c),
+                (4, 0x87afaf),
+                (5, 0xaf8787),
+                (6, 0x878787),
+            ] {
+                assert_eq!(
+                    terminal.palette.ansi[index],
+                    rgb_from_rgba(gpui::rgb(expected))
+                );
+                assert!(
+                    hsla_from_rgb(terminal.palette.ansi[index + 8]).l
+                        > hsla_from_rgb(terminal.palette.ansi[index]).l
+                );
+            }
+        });
+    }
+
+    #[test]
     fn resolve_named_red_to_hsla() {
         let t = themed_with(pal());
         // The table lookup must equal the engine's palette resolution.
         let h = hsla_from_rgb(resolve_color(&FrameColor::Ansi(1).to_engine(), &t.palette));
         assert_eq!(t.color(FrameColor::Ansi(1)), h);
         let rgba = h.to_rgb();
-        assert!((rgba.r - 0xCC as f32 / 255.0).abs() < 0.01);
+        assert!((rgba.r - f32::from(t.palette.ansi[1].r) / 255.0).abs() < 0.01);
     }
 
     #[test]

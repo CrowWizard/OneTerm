@@ -69,7 +69,11 @@ impl Render for SessionPanel {
             .justify_center()
             .text_color(theme.muted_foreground)
             .text_sm()
-            .child("No SSH session yet. Right-click → New Session.");
+            .child(if !self.store.read(cx).may_create() {
+                "No saved SSH sessions. Use Quick Connect from the terminal + menu."
+            } else {
+                "No SSH session yet. Right-click → New Session."
+            });
         // No `context_menu` here: the list container below carries one for the
         // whole area, empty list included, so this element had a second,
         // identical menu that fired for the same right-click (`US-0119` rework).
@@ -119,7 +123,9 @@ impl Render for SessionPanel {
                         let focus = focus.clone();
                         let suppressed = self.row_was_right_clicked.clone();
                         move |menu, _window, _cx| {
-                            if suppressed.replace(false) {
+                            if suppressed.replace(false)
+                                || !oneterm_actions::action_allowed_when_elevated("new_ssh_session")
+                            {
                                 return menu;
                             }
                             menu.action_context(focus.clone())

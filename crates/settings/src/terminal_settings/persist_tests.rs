@@ -21,6 +21,29 @@ fn config_json(cfg: &TerminalConfig) -> serde_json::Value {
     serde_json::to_value(cfg).expect("TerminalConfig serializes")
 }
 
+#[test]
+fn pwsh_executable_roundtrip_reselection_and_empty_reset() {
+    use oneterm_core::ShellKind;
+    let mut settings = TerminalSettings::default();
+    settings.set_kind(ShellKind::Pwsh);
+    let program = std::path::PathBuf::from(r"D:\Program Files\PowerShell\7\pwsh.exe");
+    settings.set_program(program.to_string_lossy().into_owned());
+    settings.set_kind(ShellKind::Pwsh);
+    let json = serde_json::to_string(&settings.to_config()).unwrap();
+    let config: TerminalConfig = serde_json::from_str(&json).unwrap();
+    let restored = TerminalSettings::from_config(&config);
+    assert_eq!(restored.shell.kind, ShellKind::Pwsh);
+    assert_eq!(restored.shell.program.as_ref(), Some(&program));
+    settings.set_program("   ".into());
+    assert!(settings.shell.program.is_none());
+    settings.set_program(program.to_string_lossy().into_owned());
+    settings.set_kind(ShellKind::Custom);
+    assert!(
+        settings.shell.program.is_none(),
+        "another kind must not inherit pwsh.exe"
+    );
+}
+
 /// Field-by-field equality of two live settings. `LocalShellConfig` has no
 /// `PartialEq`, so the shell is compared through its JSON form.
 fn assert_settings_eq(actual: &TerminalSettings, expected: &TerminalSettings) {

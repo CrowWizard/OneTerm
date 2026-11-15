@@ -14,7 +14,7 @@ use gpui::{
 };
 use gpui_component::dock::{ClosePanel, DragPanel, Panel, PanelControl, PanelEvent, TabGroup};
 use gpui_component::{
-    ActiveTheme as _, Colorize as _, IconName, Sizable as _,
+    ActiveTheme as _, Colorize as _, IconName, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     menu::{DropdownMenu as _, PopupMenuItem},
 };
@@ -30,11 +30,12 @@ use oneterm_state::AppServices;
 use oneterm_terminal::{PtySize, SessionKind, TerminalSession};
 use std::path::PathBuf;
 
+use super::pane::TerminalPane;
 use super::tab_title::shell_tab_title;
 use crate::input::edit;
 use crate::security::security_policy_from_settings;
 use crate::space::{SpaceId, SpaceTree, SplitContext, SplitDir};
-use crate::terminal_view::{TerminalDeps, TerminalView, TerminalViewEvent};
+use crate::terminal_view::{TerminalDeps, TerminalView};
 
 /// How a [`labelled_separator`]'s rule is drawn: the "SSH Sessions" heading is
 /// solid, a session group's heading dashed (`IN-0033`, 2026-09-15 rework).
@@ -111,12 +112,11 @@ fn saved_session_row(title: String, color_hex: String) -> PopupMenuItem {
 ///
 /// Unelevated: the three shells, the "SSH Sessions" heading, `session_rows`, the
 /// closing separator and the two closing rows ("Quick Connect...", "New Saved
-/// Session..."). Elevated: the three shells and nothing else — M1 (`DEC-0019`)
-/// leaves an elevated window with local shells only.
+/// Session..."). Elevated: no redundant runas submenu or saved-session creation row.
 pub(super) fn menu_rows(elevated: bool, session_rows: usize) -> usize {
     const SHELL_ROWS: usize = 3;
     if elevated {
-        return SHELL_ROWS;
+        return SHELL_ROWS + 1 + session_rows + 1 + 1;
     }
     SHELL_ROWS + ELEVATED_SUBMENU_ROWS + 1 + session_rows + 1 + 2
 }
@@ -165,7 +165,8 @@ pub struct TerminalPanel {
     /// DockArea identity used to publish active state only to this workspace.
     pub(super) workspace_id: Option<EntityId>,
     /// The pane tree — leaves are terminals or empty placeholders.
-    pub(super) tree: SpaceTree,
+    pub(super) tree: SpaceTree<TerminalPane>,
+    pub(crate) drop_preview: std::rc::Rc<std::cell::Cell<Option<(SpaceId, SplitDir)>>>,
     /// Reference to the containing `TabGroup`, used by terminal-tab close policy.
     pub(super) tab_panel: Option<WeakEntity<TabGroup>>,
     /// Whether this panel is the currently selected tab in the `TabGroup`.
@@ -193,6 +194,12 @@ pub struct TerminalPanel {
 
 /// What a new terminal tab hosts. Passed to [`TerminalPanel::open`].
 pub enum PanelSpec {
+    #[cfg(feature = "ghostty-native")]
+    NativeSession {
+        session: std::sync::Arc<dyn oneterm_terminal::ghostty_session::NativeSession>,
+        title: String,
+        duplicate_config: Option<SessionDuplicateConfig>,
+    },
     /// The default local shell from settings, bound to the dock area
     /// `workspace` (the primary workspace when `None`).
     DefaultShell { workspace: Option<EntityId> },
@@ -223,6 +230,15 @@ impl TerminalPanel {
         // views get them handed down (ARCH-20).
         let deps = TerminalDeps::from_globals(cx);
         let (view, tab_title, workspace_id) = match spec {
+            #[cfg(feature = "ghostty-native")]
+            PanelSpec::NativeSession {
+                session,
+                title,
+                duplicate_config,
+            } => {
+                let pane = Self::new_native_view(&deps, session, duplicate_config, window, cx);
+                (pane, title, primary)
+            }
             PanelSpec::DefaultShell { workspace } => {
                 // `--elevated-shell <kind>` *replaces* the configured default
                 // shell rather than adding a tab beside it, so `DEC-0016`'s
@@ -259,7 +275,7 @@ impl TerminalPanel {
             } => {
                 let session = cx.new(|_| session);
                 let view = Self::new_view(&deps, session, duplicate_config, window, cx);
-                (Some(view), title, primary)
+                (Some(TerminalPane::Legacy(view)), title, primary)
             }
         };
 
@@ -267,7 +283,7 @@ impl TerminalPanel {
         let tree = match &view {
             Some(view) => {
                 // Focus the terminal view right after creation.
-                view.read(cx).focus_handle(cx).focus(window, cx);
+                view.focus(cx).focus(window, cx);
                 SpaceTree::new_terminal(view.clone(), focus)
             }
             None => {
@@ -295,6 +311,7 @@ impl TerminalPanel {
             _dock_focus_subscription: dock_focus_subscription,
             workspace_id,
             tree,
+            drop_preview: Default::default(),
             tab_panel: None,
             is_active: false,
             tab_title,
@@ -320,11 +337,16 @@ impl TerminalPanel {
         shell_kind_override: Option<ShellKind>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<Entity<TerminalView>> {
+    ) -> Option<TerminalPane> {
+        #[cfg(feature = "ghostty-native")]
+        if !crate::NativeWorkspaceSessions::accepting(cx) {
+            log::warn!("Local terminal creation rejected during native workspace shutdown");
+            return None;
+        }
         let shell = {
             let settings = deps.settings.read(cx);
             match shell_kind_override {
-                Some(kind) => {
+                Some(kind) if kind != settings.shell.kind => {
                     // Override the shell kind but keep other settings (utf8, cwd, env, args).
                     let mut shell = settings.shell.clone();
                     shell.kind = kind;
@@ -332,24 +354,52 @@ impl TerminalPanel {
                     shell.program = None;
                     shell
                 }
-                None => settings.shell.clone(),
+                _ => settings.shell.clone(),
             }
         };
-        let session = match Self::spawn_local_session(deps, shell.clone(), cx) {
+        let settings = deps.settings.read(cx);
+        let session = match AppServices::session_factory(cx).create_local(
+            shell.clone(),
+            INITIAL_PTY_SIZE,
+            settings.scrollback_history,
+            security_policy_from_settings(settings),
+            settings.logging.local_config(),
+        ) {
             Ok(session) => session,
             Err(error) => {
                 log::error!("Failed to spawn local terminal session: {error}");
+                let message = error.to_string();
+                window.defer(cx, move |window, cx| {
+                    let note = oneterm_theme::notif_ext::notify(
+                        gpui_component::notification::NotificationType::Error,
+                        message,
+                        cx,
+                    );
+                    window.push_notification(note, cx);
+                });
                 return None;
             }
         };
-        let session = cx.new(|_| session);
-        Some(Self::new_view(
-            deps,
-            session,
-            Some(SessionDuplicateConfig::Local(shell)),
-            window,
-            cx,
-        ))
+        match session {
+            oneterm_terminal::CreatedSession::Legacy(session) => {
+                let session = cx.new(|_| session);
+                Some(TerminalPane::Legacy(Self::new_view(
+                    deps,
+                    session,
+                    Some(SessionDuplicateConfig::Local(shell)),
+                    window,
+                    cx,
+                )))
+            }
+            #[cfg(feature = "ghostty-native")]
+            oneterm_terminal::CreatedSession::Native(session) => Self::new_native_view(
+                deps,
+                session,
+                Some(SessionDuplicateConfig::Local(shell)),
+                window,
+                cx,
+            ),
+        }
     }
 
     /// Spawn a local session from an exact shell configuration, applying the
@@ -376,6 +426,65 @@ impl TerminalPanel {
         )
     }
 
+    #[cfg(feature = "ghostty-native")]
+    pub(super) fn spawn_native_local_session(
+        deps: &TerminalDeps,
+        shell: LocalShellConfig,
+        cx: &mut Context<Self>,
+    ) -> oneterm_core::Result<std::sync::Arc<dyn oneterm_terminal::ghostty_session::NativeSession>>
+    {
+        if !crate::NativeWorkspaceSessions::accepting(cx) {
+            return Err(oneterm_core::AppError::msg(
+                "Native workspace is shutting down",
+            ));
+        }
+        let settings = deps.settings.read(cx);
+        AppServices::session_factory(cx).spawn_native_local(
+            shell,
+            INITIAL_PTY_SIZE,
+            settings.scrollback_history,
+            security_policy_from_settings(settings),
+            settings.logging.local_config(),
+        )
+    }
+
+    #[cfg(feature = "ghostty-native")]
+    pub(super) fn new_native_view(
+        deps: &TerminalDeps,
+        session: std::sync::Arc<dyn oneterm_terminal::ghostty_session::NativeSession>,
+        duplicate_config: Option<SessionDuplicateConfig>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<TerminalPane> {
+        let settings = deps.settings.read(cx);
+        let font = gpui::font(
+            settings
+                .font_family
+                .clone()
+                .unwrap_or_else(|| cx.theme().mono_font_family.clone()),
+        );
+        let size = settings
+            .font_size
+            .map(px)
+            .unwrap_or(cx.theme().mono_font_size);
+        let Some(events) = session.take_events() else {
+            log::error!("Native pane event receiver already taken; session cannot be installed");
+            crate::close_unplaced_session_in_workspace(
+                oneterm_terminal::CreatedSession::Native(session),
+                cx,
+            );
+            return None;
+        };
+        Some(TerminalPane::Native(cx.new(|cx| {
+            let mut pane =
+                crate::NativeTerminalPane::with_events(session, events, font, size, window, cx);
+            pane.duplicate_config = duplicate_config;
+            pane.bind_settings(deps.settings.clone(), cx);
+            pane.bind_channels(deps.input_channels.clone(), cx);
+            pane
+        })))
+    }
+
     /// Build the view for an already-created session entity.
     pub(super) fn new_view(
         deps: &TerminalDeps,
@@ -395,14 +504,12 @@ impl TerminalPanel {
     /// Point `view`'s context menu at Space `space_id` in this panel.
     pub(super) fn attach_split_ctx(
         &self,
-        view: &Entity<TerminalView>,
+        view: &TerminalPane,
         space_id: SpaceId,
         cx: &mut Context<Self>,
     ) {
         let panel = cx.entity().downgrade();
-        view.update(cx, |v, _| {
-            v.split_ctx = Some(SplitContext { panel, space_id });
-        });
+        view.attach(SplitContext { panel, space_id }, cx);
     }
 
     /// (Re)subscribe to every terminal leaf's `TerminalViewEvent` (the OSC 0/2
@@ -413,11 +520,7 @@ impl TerminalPanel {
             .tree
             .terminal_views()
             .into_iter()
-            .map(|view| {
-                cx.subscribe(&view, |_this, _view, _ev: &TerminalViewEvent, cx| {
-                    cx.notify();
-                })
-            })
+            .map(|view| view.subscribe(cx))
             .collect();
     }
 
@@ -429,26 +532,33 @@ impl TerminalPanel {
     /// The active Space's terminal view (used by Edit ▸ Find). `None` when the
     /// active Space is empty.
     pub(crate) fn active_view(&self) -> Option<Entity<TerminalView>> {
-        self.tree.active_terminal()
+        self.tree.active_terminal()?.legacy()
+    }
+
+    pub(crate) fn toggle_search(&self, window: &mut Window, cx: &mut App) {
+        match self.tree.active_terminal() {
+            Some(TerminalPane::Legacy(view)) => {
+                view.update(cx, |view, cx| view.toggle_search(window, cx))
+            }
+            #[cfg(feature = "ghostty-native")]
+            Some(TerminalPane::Native(view)) => {
+                view.update(cx, |view, cx| view.toggle_search(window, cx))
+            }
+            None => {}
+        }
     }
 
     /// Session network stats for the active Space (SSH only — `None` for local
     /// or an empty Space). Used by the StatusBar.
     pub(crate) fn network_stats(&self, cx: &App) -> Option<oneterm_terminal::NetStats> {
-        self.tree
-            .active_terminal()?
-            .read(cx)
-            .session
-            .read(cx)
-            .capabilities()
-            .network_stats
+        self.tree.active_terminal()?.capabilities(cx).network_stats
     }
 
     /// Breadcrumb label for the active Space's session: the OSC 7 cwd as
     /// displayed text. `None` when the active Space is empty or has no cwd yet.
     pub(crate) fn breadcrumb_label(&self, cx: &App) -> Option<String> {
         let view = self.tree.active_terminal()?;
-        let cwd = view.read(cx).session.read(cx).cwd()?;
+        let cwd = view.cwd(cx)?;
         Some(cwd.display().to_string())
     }
 
@@ -456,9 +566,8 @@ impl TerminalPanel {
     /// `None` for SSH (the path is remote), an empty Space, or no cwd yet.
     pub(crate) fn local_cwd(&self, cx: &App) -> Option<PathBuf> {
         let view = self.tree.active_terminal()?;
-        let session = view.read(cx).session.read(cx);
-        (session.kind() == SessionKind::Local)
-            .then(|| session.cwd())
+        (view.kind(cx) == Some(SessionKind::Local))
+            .then(|| view.cwd(cx))
             .flatten()
     }
 
@@ -481,10 +590,7 @@ impl TerminalPanel {
     /// terminal — it would re-enter the view's lease and panic
     /// (`entity_map::read` double-lease).
     pub(crate) fn tab_label(&self, cx: &App) -> String {
-        let session_title = self
-            .tree
-            .active_terminal()
-            .and_then(|v| v.read(cx).session.read(cx).title());
+        let session_title = self.tree.active_terminal().and_then(|v| v.title(cx));
         let live = match self.deps.settings.read(cx).tab_title_mode {
             TabTitleMode::Osc => session_title.as_deref(),
             TabTitleMode::Default => None,
@@ -502,7 +608,7 @@ impl TerminalPanel {
     /// Idempotent.
     pub(crate) fn shutdown(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         for view in self.tree.terminal_views() {
-            view.update(cx, |v, cx| v.shutdown(cx));
+            view.shutdown(cx);
         }
     }
 
@@ -510,26 +616,26 @@ impl TerminalPanel {
     /// (`TerminalView::join_channel`).
     pub(crate) fn join_tab_to_channel(&mut self, channel: InputChannel, cx: &mut Context<Self>) {
         for view in self.tree.terminal_views() {
-            view.update(cx, |view, cx| view.join_channel(channel, cx));
+            view.join_channel(channel, cx);
         }
     }
 
     /// Take every terminal Space of this tab out of its channel.
     pub(crate) fn leave_tab_channels(&mut self, cx: &mut Context<Self>) {
         for view in self.tree.terminal_views() {
-            view.update(cx, |view, cx| view.leave_channel(cx));
+            view.leave_channel(cx);
         }
     }
 
     /// Remove every Space, in any tab, from the channel of the active Space.
-    fn close_active_channel(&mut self, cx: &mut Context<Self>) {
-        let Some(view) = self.active_view() else {
-            return;
-        };
-        let Some(channel) = view.update(cx, |view, cx| view.channel(cx)) else {
+    pub(super) fn close_active_channel(&mut self, cx: &mut Context<Self>) {
+        let Some(view) = self.tree.active_terminal() else {
             return;
         };
         let Some(registry) = self.deps.input_channels.clone() else {
+            return;
+        };
+        let Some(channel) = registry.read(cx).channel_of(view.id()) else {
             return;
         };
         registry.update(cx, |registry, cx| {
@@ -551,14 +657,36 @@ impl TerminalPanel {
             .tree
             .terminal_views()
             .iter()
-            .map(|view| view.entity_id())
+            .map(|view| view.id())
             .collect();
         registry.read(cx).channels_in(&ids)
     }
 
     /// Run an edit command (copy/paste/select-all/clear) on the active
     /// terminal's session, if the active Space has one.
-    fn edit_active(&self, edit: edit::EditCommand, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn edit_active(
+        &self,
+        edit: edit::EditCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        #[cfg(feature = "ghostty-native")]
+        if let Some(TerminalPane::Native(view)) = self.tree.active_terminal() {
+            view.update(cx, |view, cx| {
+                if std::ptr::fn_addr_eq(edit, edit::copy_selection as edit::EditCommand) {
+                    view.edit(false, cx);
+                } else if std::ptr::fn_addr_eq(edit, edit::paste_clipboard as edit::EditCommand) {
+                    view.edit(true, cx);
+                } else if std::ptr::fn_addr_eq(edit, edit::select_all as edit::EditCommand) {
+                    view.select_all(cx);
+                } else if std::ptr::fn_addr_eq(edit, edit::clear_screen as edit::EditCommand) {
+                    view.clear_command(cx);
+                } else {
+                    view.unsupported("edit command", cx);
+                }
+            });
+            return;
+        }
         if let Some(view) = self.active_view() {
             let (session, origin) = view.update(cx, |view, cx| {
                 (view.session.clone(), view.broadcast_origin(cx))
@@ -587,6 +715,7 @@ impl Render for TerminalPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = self.tree.render(
             cx.entity().downgrade(),
+            self.drop_preview.clone(),
             self.deps.input_channels.as_ref(),
             window,
             cx,
@@ -595,11 +724,8 @@ impl Render for TerminalPanel {
             .id("terminal-panel")
             .size_full()
             .bg(cx.theme().background)
-            // A tab dragged out of the rail or the strip (the dock's `DragPanel`) dropped anywhere on
-            // the terminal area does nothing: the dock must not split or merge the centre under a
-            // terminal (owner ruling 2026-10-23). The consumer closest to the pointer takes the
-            // drop, so an empty Space's own handler still wins over this one, and gpui takes the
-            // drag before it asks anything, so the dock's content handler never sees it.
+            // Space handlers own directional splits and empty placement.
+            // All remaining drops stay inert rather than splitting the dock.
             .on_drop(|_: &DragPanel, _, _| {})
             // Terminal context-menu action handlers — also fired by global key bindings.
             .on_action(cx.listener(|this, _: &ClosePanel, w, cx| this.close_tab(w, cx)))
@@ -631,13 +757,13 @@ impl Render for TerminalPanel {
                 this.edit_active(edit::clear_screen, w, cx)
             }))
             .on_action(cx.listener(|this, action: &JoinInputChannel, _w, cx| {
-                if let Some(view) = this.active_view() {
-                    view.update(cx, |view, cx| view.join_channel(action.0, cx));
+                if let Some(view) = this.tree.active_terminal() {
+                    view.join_channel(action.0, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &LeaveInputChannel, _w, cx| {
-                if let Some(view) = this.active_view() {
-                    view.update(cx, |view, cx| view.leave_channel(cx));
+                if let Some(view) = this.tree.active_terminal() {
+                    view.leave_channel(cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &CloseInputChannel, _w, cx| {
@@ -695,7 +821,7 @@ impl gpui_base::dock::Panel for TerminalPanel {
             self.publish_active_session(cx);
             // Selecting the tab is seeing it: a finished status is acknowledged.
             for view in self.tree.terminal_views() {
-                view.update(cx, |view, cx| view.acknowledge_program_status(cx));
+                view.acknowledge(cx);
             }
         }
     }
@@ -759,20 +885,17 @@ impl Panel for TerminalPanel {
                 for kind in SHELLS {
                     menu = menu.menu(kind.display_name(), Box::new(AddPanelWithShell(kind)));
                 }
-                // M1 (`DEC-0019`): an elevated window runs local shells and
-                // nothing else — no "Run as administrator" row either, since a
-                // `runas` from an elevated process would only produce a second
-                // identical window — no SSH Sessions heading, no saved sessions,
-                // no Quick Connect, no New Saved Session. The menu ends here.
-                if oneterm_core::elevation::is_restricted() {
-                    return menu.scrollable(menu_scrolls(menu_rows(true, 0), window));
+                let restricted = oneterm_core::elevation::is_restricted();
+                // Unknown token status still has no network surfaces.
+                if !oneterm_actions::action_allowed_when_elevated("open_session") {
+                    return menu.scrollable(menu_scrolls(3, window));
                 }
                 // One submenu row rather than three top-level rows, so the
                 // owner-fixed order below the shell block is not disturbed and
                 // "open a shell" never shares a hit target with "open an
                 // elevated shell" (`US-0132`).
                 #[cfg(windows)]
-                {
+                if !restricted {
                     menu = menu.submenu(
                         "Run as administrator",
                         window,
@@ -826,13 +949,15 @@ impl Panel for TerminalPanel {
                 let open_saved_dialog = commands.open_new_saved_session_dialog;
                 menu = menu
                     .separator()
-                    .menu("Quick Connect...", Box::new(NewSession))
-                    .item(
+                    .menu("Quick Connect...", Box::new(NewSession));
+                if !restricted {
+                    menu = menu.item(
                         PopupMenuItem::new("New Saved Session...")
                             .on_click(move |_, window, cx| open_saved_dialog(window, cx)),
                     );
+                }
 
-                menu.scrollable(menu_scrolls(menu_rows(false, session_rows), window))
+                menu.scrollable(menu_scrolls(menu_rows(restricted, session_rows), window))
             })
             .anchor(Anchor::TopRight);
         Some(btn)

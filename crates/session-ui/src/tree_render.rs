@@ -35,6 +35,8 @@ pub(crate) enum SessionMenuRow {
     Duplicate,
     /// Submenu: move the right-clicked session into another group.
     MoveToGroup,
+    /// Toggle this saved session as the single automatic startup connection.
+    ConnectOnStartup,
     /// Create a session — global, so it does not sit in the first slot.
     NewSession,
     /// Delete the right-clicked session, after a confirmation.
@@ -48,11 +50,12 @@ pub(crate) enum SessionMenuRow {
 /// "New Session" no longer occupies the most-misclicked slot (`F24`); and Delete
 /// is last, behind its own separator and styled destructive, which is the shape
 /// the SFTP browser's delete already uses.
-pub(crate) const SESSION_MENU_ROWS: [SessionMenuRow; 8] = [
+pub(crate) const SESSION_MENU_ROWS: [SessionMenuRow; 9] = [
     SessionMenuRow::Open,
     SessionMenuRow::Properties,
     SessionMenuRow::Duplicate,
     SessionMenuRow::MoveToGroup,
+    SessionMenuRow::ConnectOnStartup,
     SessionMenuRow::Separator,
     SessionMenuRow::NewSession,
     SessionMenuRow::Separator,
@@ -334,6 +337,16 @@ impl SessionPanel {
             move |ix, entry, menu, window, cx| {
                 // Clear the old highlight, highlight only the right-clicked item.
                 right_clicked_ix.set(Some(ix));
+                if oneterm_core::elevation::is_restricted() {
+                    return match parse_session_id(&entry.item().id) {
+                        Some(id) => {
+                            menu.item(PopupMenuItem::new("Open").on_click(move |_, window, cx| {
+                                crate::open_saved_ssh_session(id.raw(), window, cx)
+                            }))
+                        }
+                        None => menu,
+                    };
+                }
                 if entry.is_folder() {
                     // Group folder → rename the group, then the global action.
                     let group = parse_group_id(&entry.item().id);
@@ -419,6 +432,27 @@ impl SessionPanel {
                                 "Move to Group",
                                 move_to_group_submenu(session_id, window, cx),
                             )),
+                            SessionMenuRow::ConnectOnStartup => {
+                                let selected =
+                                    SshSessionStore::global(cx).read(cx).startup_session_id()
+                                        == Some(session_id);
+                                menu.item(
+                                    PopupMenuItem::new("Connect on Startup")
+                                        .checked(selected)
+                                        .on_click(move |_, _, cx| {
+                                            SshSessionStore::global(cx).update(cx, |store, cx| {
+                                                let next = if store.startup_session_id()
+                                                    == Some(session_id)
+                                                {
+                                                    None
+                                                } else {
+                                                    Some(session_id)
+                                                };
+                                                store.set_startup_session(next, cx);
+                                            });
+                                        }),
+                                )
+                            }
                             // `PopupMenuItem` has no destructive variant, so the
                             // row draws its own label in the theme's danger
                             // colour; the confirmation behind it is the SFTP
@@ -462,6 +496,7 @@ mod tests {
                 SessionMenuRow::Properties,
                 SessionMenuRow::Duplicate,
                 SessionMenuRow::MoveToGroup,
+                SessionMenuRow::ConnectOnStartup,
                 SessionMenuRow::NewSession,
                 SessionMenuRow::Delete,
             ]
@@ -484,6 +519,7 @@ mod tests {
                 SessionMenuRow::Properties,
                 SessionMenuRow::Duplicate,
                 SessionMenuRow::MoveToGroup,
+                SessionMenuRow::ConnectOnStartup,
             ]
         );
         // The row says what it copies, so it cannot be read as the terminal

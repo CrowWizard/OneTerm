@@ -246,6 +246,10 @@ fn commit_session(
     cx: &mut App,
 ) {
     let store = SshSessionStore::global(cx);
+    if !store.read(cx).may_create() {
+        window.push_notification(notify(NotificationType::Error, "Session changes are unavailable: check window permissions and Session file access.", cx), cx);
+        return;
+    }
     match edit_id {
         Some(id) => store.update(cx, |s, cx| s.update(id, session, cx)),
         None => {
@@ -473,6 +477,13 @@ pub(crate) fn open_session_dialog(
     edit: Option<(SshSessionId, SshSession)>,
     focus_group: bool,
 ) {
+    if !SshSessionStore::global(cx).read(cx).may_create()
+        || (edit.is_some() && oneterm_core::elevation::is_restricted())
+    {
+        window.push_notification(notify(NotificationType::Error,
+            "Session changes are unavailable: check window permissions and Session file access.", cx), cx);
+        return;
+    }
     let is_edit = edit.is_some();
     let edit_id = edit.as_ref().map(|(id, _)| *id);
     let title: &'static str = if is_edit {
@@ -696,6 +707,17 @@ pub(crate) fn open_session_dialog(
                     return false;
                 }
             };
+            if oneterm_core::elevation::is_restricted() && plan.needs_vault() {
+                window.push_notification(
+                    notify(
+                        NotificationType::Warning,
+                        "Saved passwords cannot be changed while the process token is unknown.",
+                        cx,
+                    ),
+                    cx,
+                );
+                return false;
+            }
             if !plan.needs_vault() {
                 let (value, note) = match plan {
                     PasswordPlan::Store(value) => (value, None),
@@ -807,7 +829,17 @@ pub(crate) fn open_session_dialog(
                     cx,
                 ))
                 .child(auth_form.render(false, cx))
-                .child(auth_form.render_saved_password_editor(cx))
+                .when(!oneterm_core::elevation::is_restricted(), |content| {
+                    content.child(auth_form.render_saved_password_editor(cx))
+                })
+                .when(oneterm_core::elevation::is_restricted(), |content| {
+                    content.child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Save the Session here; enter its password when connecting."),
+                    )
+                })
                 // Jump host, agent forwarding and port forwards fold away: most
                 // sessions use none of them, and the three of them are most of
                 // the form's height (`US-0120`).

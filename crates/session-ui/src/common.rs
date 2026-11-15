@@ -36,7 +36,7 @@ use crate::session_state::SshLoggingOverride;
 use oneterm_settings::TerminalSettings;
 use oneterm_state::commands::SshDuplicateCompletion;
 use oneterm_state::{AppServices, AppState};
-use oneterm_terminal::PtySize;
+use oneterm_terminal::{CreatedSession, PtySize};
 use oneterm_terminal_view::{PanelSpec, TerminalPanel};
 use oneterm_theme::notif_ext::notify;
 
@@ -444,100 +444,193 @@ pub(crate) fn connect_ssh_session(
     let retry_request = request.clone();
     let connecting_for_task = connecting.clone();
     let task_cancellation = cancellation.clone();
+    #[cfg(feature = "ghostty-native")]
+    let mut connection_guard =
+        oneterm_terminal_view::NativeWorkspaceSessions::begin_connection(cancellation.clone(), cx);
     window
         .spawn(cx, async move |cx| {
+            let initial_cwd = request.initial_cwd.clone();
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    factory.connect_ssh(
+                    let session = factory.create_ssh(
                         cfg,
                         PtySize::INITIAL,
                         scrollback,
                         security,
                         logging,
                         keepalive,
-                    )
+                    )?;
+                    let initial_error = if let Some(cwd) = initial_cwd.as_deref() {
+                        let command = remote_cd_command(cwd);
+                        match &session {
+                            CreatedSession::Legacy(session) => {
+                                session.send_text(&command);
+                                None
+                            }
+                            #[cfg(feature = "ghostty-native")]
+                            CreatedSession::Native(session) => {
+                                session.commit_text(&command).err().map(|error| {
+                                    AppError::msg(format!(
+                                        "SSH initial directory input failed: {error}"
+                                    ))
+                                })
+                            }
+                        }
+                    } else {
+                        None::<AppError>
+                    };
+                    if let Some(error) = initial_error {
+                        return Ok((session, Some(error)));
+                    }
+                    Ok((session, None))
                 })
                 .await;
+            let result = match result {
+                Ok((session, Some(error))) => {
+                    #[cfg(feature = "ghostty-native")]
+                    if let Some(guard) = connection_guard.take() {
+                        guard
+                            .close_unplaced(session, cx.background_executor().clone())
+                            .await;
+                    } else {
+                        oneterm_terminal_view::close_unplaced_session(
+                            session,
+                            cx.background_executor().clone(),
+                        );
+                    }
+                    #[cfg(not(feature = "ghostty-native"))]
+                    oneterm_terminal_view::close_unplaced_session(
+                        session,
+                        cx.background_executor().clone(),
+                    );
+                    Err(error)
+                }
+                Ok((session, None)) => Ok(session),
+                Err(error) => Err(error),
+            };
             if task_cancellation.is_cancelled() {
                 connecting_for_task.store(false, std::sync::atomic::Ordering::Relaxed);
+                if let Ok(session) = result {
+                    #[cfg(feature = "ghostty-native")]
+                    if let Some(guard) = connection_guard.take() {
+                        guard
+                            .close_unplaced(session, cx.background_executor().clone())
+                            .await;
+                        return;
+                    }
+                    oneterm_terminal_view::close_unplaced_session(
+                        session,
+                        cx.background_executor().clone(),
+                    );
+                }
+                #[cfg(feature = "ghostty-native")]
+                if let Some(guard) = connection_guard.take() {
+                    guard.finish();
+                }
                 return;
             }
 
-            _ = cx.update(|window, cx| match result {
-                Ok(ssh_session) => {
-                    let SshConnectRequest {
-                        label,
-                        initial_cwd,
-                        completion,
-                        on_connected,
-                        on_failed: _,
-                        logging_override: _,
-                    } = request;
-                    connecting_for_task.store(false, std::sync::atomic::Ordering::Relaxed);
-                    window.close_dialog(cx);
-                    if let Some(on_connected) = on_connected {
-                        on_connected(window, cx);
-                    }
-                    if let Some(cwd) = initial_cwd.as_deref() {
-                        ssh_session.send_text(&remote_cd_command(cwd));
-                    }
-                    let duplicate_config =
-                        oneterm_core::SessionDuplicateConfig::Ssh(duplicate_config);
-                    if let Some(completion) = completion {
-                        completion(ssh_session, label.clone(), duplicate_config, window, cx);
-                    } else {
-                        let panel: Arc<dyn PanelView> = Arc::new(TerminalPanel::open(
-                            PanelSpec::Session {
-                                session: ssh_session,
-                                title: label.clone(),
-                                duplicate_config: Some(duplicate_config),
-                            },
-                            window,
+            let mut pending = Some(result);
+            let update = cx.update(|window, cx| {
+                match pending.take().expect("connection result consumed once") {
+                    Ok(ssh_session) => {
+                        let SshConnectRequest {
+                            label,
+                            initial_cwd: _,
+                            completion,
+                            on_connected,
+                            on_failed: _,
+                            logging_override: _,
+                        } = request;
+                        connecting_for_task.store(false, std::sync::atomic::Ordering::Relaxed);
+                        window.close_dialog(cx);
+                        if let Some(on_connected) = on_connected {
+                            on_connected(window, cx);
+                        }
+                        let duplicate_config =
+                            oneterm_core::SessionDuplicateConfig::Ssh(duplicate_config);
+                        if let Some(completion) = completion {
+                            completion(ssh_session, label.clone(), duplicate_config, window, cx);
+                        } else {
+                            let spec = match ssh_session {
+                                CreatedSession::Legacy(session) => PanelSpec::Session {
+                                    session,
+                                    title: label.clone(),
+                                    duplicate_config: Some(duplicate_config),
+                                },
+                                #[cfg(feature = "ghostty-native")]
+                                CreatedSession::Native(session) => PanelSpec::NativeSession {
+                                    session,
+                                    title: label.clone(),
+                                    duplicate_config: Some(duplicate_config),
+                                },
+                            };
+                            let panel: Arc<dyn PanelView> =
+                                Arc::new(TerminalPanel::open(spec, window, cx));
+                            add_ssh_terminal_to_dock(&panel, window, cx);
+                        }
+                        window.push_notification(
+                            notify(
+                                NotificationType::Success,
+                                format!("Connected to \"{label}\"."),
+                                cx,
+                            ),
                             cx,
-                        ));
-                        add_ssh_terminal_to_dock(&panel, window, cx);
+                        );
                     }
-                    window.push_notification(
-                        notify(
-                            NotificationType::Success,
-                            format!("Connected to \"{label}\"."),
-                            cx,
-                        ),
-                        cx,
-                    );
-                }
-                Err(AppError::HostKeyUnknown {
-                    host,
-                    port,
-                    algorithm,
-                    fingerprint,
-                }) => {
-                    connecting_for_task.store(false, std::sync::atomic::Ordering::Relaxed);
-                    window.close_dialog(cx);
-                    open_host_key_confirmation(
-                        retry_cfg,
-                        retry_request,
+                    Err(AppError::HostKeyUnknown {
                         host,
                         port,
                         algorithm,
                         fingerprint,
-                        window,
-                        cx,
-                    );
-                }
-                Err(error) => {
-                    connecting_for_task.store(false, std::sync::atomic::Ordering::Relaxed);
-                    // The dialog is still open: the user can correct a field and
-                    // press Connect again without re-typing the password.
-                    let message = SharedString::from(connect_failure_message(&error));
-                    if let Some(on_failed) = &request.on_failed {
-                        on_failed(&error, message.clone(), window, cx);
+                    }) => {
+                        connecting_for_task.store(false, std::sync::atomic::Ordering::Relaxed);
+                        window.close_dialog(cx);
+                        open_host_key_confirmation(
+                            retry_cfg,
+                            retry_request,
+                            host,
+                            port,
+                            algorithm,
+                            fingerprint,
+                            window,
+                            cx,
+                        );
                     }
-                    window.refresh();
-                    window.push_notification(notify(NotificationType::Error, message, cx), cx);
+                    Err(error) => {
+                        connecting_for_task.store(false, std::sync::atomic::Ordering::Relaxed);
+                        // The dialog is still open: the user can correct a field and
+                        // press Connect again without re-typing the password.
+                        let message = SharedString::from(connect_failure_message(&error));
+                        if let Some(on_failed) = &request.on_failed {
+                            on_failed(&error, message.clone(), window, cx);
+                        }
+                        window.refresh();
+                        window.push_notification(notify(NotificationType::Error, message, cx), cx);
+                    }
                 }
             });
+            if update.is_err() {
+                connecting_for_task.store(false, std::sync::atomic::Ordering::Relaxed);
+                if let Some(Ok(session)) = pending.take() {
+                    #[cfg(feature = "ghostty-native")]
+                    if let Some(guard) = connection_guard.take() {
+                        guard
+                            .close_unplaced(session, cx.background_executor().clone())
+                            .await;
+                        return;
+                    }
+                    oneterm_terminal_view::close_unplaced_session(
+                        session,
+                        cx.background_executor().clone(),
+                    );
+                }
+            }
+            #[cfg(feature = "ghostty-native")]
+            if let Some(guard) = connection_guard.take() {
+                guard.finish();
+            }
         })
         .detach();
     cancellation

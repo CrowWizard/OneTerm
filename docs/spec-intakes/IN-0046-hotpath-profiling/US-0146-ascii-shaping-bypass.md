@@ -8,6 +8,15 @@ Created: 2026-09-28
 
 ## Status
 
+US-0248 portability correction (2026-11-12): the historical Fira Code rejection
+evidence below describes the measured contextual font version, not every version
+of the family. Installed Fira Code 1.207 lacks GSUB ccmp. The real-font regression
+now witnesses short-context glyph substitution independently, requires rejection
+when witnessed, and compares cache output field-for-field with DirectWrite for
+regular/bold/italic variants, forced and unforced. The production behavioral check
+and unconditional synthetic contextual rejection remain unchanged; historical
+measurements are retained rather than rewritten.
+
 <!-- HARNESS:STATUS:BEGIN -->
 - [x] Planned
 - [x] In progress

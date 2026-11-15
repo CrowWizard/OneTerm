@@ -60,6 +60,101 @@ pub(crate) fn can_close_space(leaf_count: usize) -> bool {
     leaf_count > 1
 }
 
+/// Reuse the registered SSH dialogs without introducing a session-feature edge.
+pub(crate) fn new_ssh_submenu(
+    menu: PopupMenu,
+    window: &mut Window,
+    cx: &mut gpui::Context<PopupMenu>,
+) -> PopupMenu {
+    ssh_submenu(menu, None, window, cx)
+}
+
+pub(crate) fn ssh_here_submenu(
+    menu: PopupMenu,
+    panel: WeakEntity<TerminalPanel>,
+    space: SpaceId,
+    window: &mut Window,
+    cx: &mut gpui::Context<PopupMenu>,
+) -> PopupMenu {
+    ssh_submenu(
+        menu,
+        Some(TerminalPanel::ssh_here_completion(panel, space)),
+        window,
+        cx,
+    )
+}
+
+fn ssh_submenu(
+    menu: PopupMenu,
+    completion: Option<oneterm_state::commands::SshDuplicateCompletion>,
+    window: &mut Window,
+    cx: &mut gpui::Context<PopupMenu>,
+) -> PopupMenu {
+    if !oneterm_actions::action_allowed_when_elevated("open_session")
+        || !cx.has_global::<oneterm_state::AppServices>()
+    {
+        // Standalone terminal fixtures may have no application command bundle.
+        return menu;
+    }
+    let commands = oneterm_state::commands::commands(cx);
+    let saved = (commands.saved_ssh_sessions)(cx);
+    let rows = 2 + saved
+        .iter()
+        .map(|(group, rows)| rows.len() + usize::from(!group.is_empty()))
+        .sum::<usize>()
+        .max(1);
+    let scrolls = gpui::px(rows as f32 * 28.)
+        > (window.window_bounds().get_bounds().size.height * 0.5).min(gpui::px(450.));
+    let label = if completion.is_some() {
+        "New SSH Here"
+    } else {
+        "New SSH"
+    };
+    menu.submenu(label, window, cx, move |submenu, _, _| {
+        let quick = commands.open_quick_connect_dialog;
+        let quick_completion = completion.clone();
+        let mut submenu = submenu
+            .item(
+                PopupMenuItem::new("Quick Connect...").on_click(move |_, window, cx| {
+                    if let Some(completion) = &quick_completion {
+                        (commands.open_quick_connect_to)(completion.clone(), window, cx);
+                    } else {
+                        quick(window, cx);
+                    }
+                }),
+            )
+            .separator();
+        if saved.iter().all(|(_, rows)| rows.is_empty()) {
+            submenu = submenu.item(PopupMenuItem::new("No saved sessions").disabled(true));
+        }
+        for (group, rows) in &saved {
+            if !group.is_empty() && !rows.is_empty() {
+                submenu = submenu.label(group.clone());
+            }
+            for (id, name, _) in rows {
+                let id = *id;
+                let open = commands.open_saved_ssh_session;
+                let completion = completion.clone();
+                submenu = submenu.item(PopupMenuItem::new(name.clone()).on_click(
+                    move |_, window, cx| {
+                        if let Some(completion) = &completion {
+                            (commands.open_saved_ssh_session_to)(
+                                id,
+                                completion.clone(),
+                                window,
+                                cx,
+                            );
+                        } else {
+                            open(id, window, cx);
+                        }
+                    },
+                ));
+            }
+        }
+        submenu.scrollable(scrolls)
+    })
+}
+
 /// Label of one Duplicate Session destination.
 pub(crate) fn duplicate_label(destination: DuplicateDestination) -> String {
     match destination {
@@ -74,7 +169,7 @@ pub(crate) fn duplicate_label(destination: DuplicateDestination) -> String {
     }
 }
 
-/// Build the menu in the order fixed by the LLD: New Terminal, Duplicate
+/// Build the menu in the order fixed by the LLD: New Terminal, New SSH, Duplicate
 /// Session, splits, edit commands, Log, close items.
 ///
 /// Each item carries both an action (for the shortcut hint and global
@@ -98,6 +193,8 @@ pub(crate) fn build_menu(
                 }
             }),
     );
+
+    menu = new_ssh_submenu(menu, window, cx);
 
     if let Some(split) = &ctx.split {
         let destinations = split.empty_destinations.clone();
@@ -359,7 +456,7 @@ fn edit_item(
 
 /// Start logging this terminal. The file is opened on the background executor
 /// because it touches the filesystem.
-fn start_logging(logging: TerminalLogController, window: &mut Window, cx: &mut App) {
+pub(crate) fn start_logging(logging: TerminalLogController, window: &mut Window, cx: &mut App) {
     let config = TerminalSettings::global(cx)
         .read(cx)
         .logging
@@ -397,7 +494,7 @@ fn start_logging(logging: TerminalLogController, window: &mut Window, cx: &mut A
         .detach();
 }
 
-fn stop_logging(logging: TerminalLogController, window: &mut Window, cx: &mut App) {
+pub(crate) fn stop_logging(logging: TerminalLogController, window: &mut Window, cx: &mut App) {
     window
         .spawn(cx, async move |cx| {
             let operation = logging.clone();

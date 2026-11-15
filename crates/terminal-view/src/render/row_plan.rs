@@ -214,7 +214,7 @@ fn resolve_style(
     let mut fg = theme.color(fg_color);
     let bg = theme.color(bg_color);
     if let Some(class_fg) = class.fg
-        && (fg_color == Color::Foreground || class.override_ansi)
+        && (fg_color.is_default_foreground() || class.override_ansi)
     {
         fg = to_gpui_hsla(class_fg);
     }

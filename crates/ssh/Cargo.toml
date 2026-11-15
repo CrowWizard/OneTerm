@@ -9,6 +9,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [features]
+ghostty-native = ["oneterm-terminal/ghostty-native"]
 terminal-diagnostics = []
 # Function-level profiling sites (IN-0046). Off by default: without it every
 # `#[cfg_attr(feature = "hotpath-profiling", hotpath::measure)]` vanishes and

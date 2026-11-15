@@ -112,7 +112,11 @@ fn the_panel_reads_the_shell_from_its_terminal(cx: &mut TestAppContext) {
         (local(ShellKind::Bash, None), AppIcon::Terminal),
     ] {
         panel.update(cx, |panel, cx| {
-            let view = panel.tree.active_terminal().expect("a terminal");
+            let view = panel
+                .tree
+                .active_terminal()
+                .and_then(|pane| pane.legacy())
+                .expect("a legacy terminal");
             view.update(cx, |view, _| view.duplicate_config = Some(config));
         });
         assert_eq!(icon(&panel, cx), expected);

@@ -77,11 +77,42 @@ pub(crate) async fn sftp_task(
     alive: Arc<AtomicBool>,
     shutdown: CancellationToken,
 ) {
+    run_sftp_task(sftp, cmd_rx, alive, shutdown, None).await;
+}
+
+#[cfg(feature = "ghostty-native")]
+pub(crate) async fn native_sftp_task(
+    sftp: SftpChannel,
+    cmd_rx: Receiver<SftpCmd>,
+    alive: Arc<AtomicBool>,
+    shutdown: CancellationToken,
+    transport_stop: CancellationToken,
+) {
+    run_sftp_task(sftp, cmd_rx, alive, shutdown, Some(transport_stop)).await;
+}
+
+async fn run_sftp_task(
+    sftp: SftpChannel,
+    cmd_rx: Receiver<SftpCmd>,
+    alive: Arc<AtomicBool>,
+    shutdown: CancellationToken,
+    transport_stop: Option<CancellationToken>,
+) {
+    let native = transport_stop.is_some();
     log::info!("sftp_task: started");
 
     // Load uid→name and gid→name maps from /etc/passwd + /etc/group.
     // Best-effort: if unreadable → empty map, numbers shown.
-    let lookup = Arc::new(load_uid_gid_lookup(&sftp).await);
+    let lookup = if native {
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => return,
+            lookup = load_uid_gid_lookup(&sftp) => lookup,
+        }
+    } else {
+        load_uid_gid_lookup(&sftp).await
+    };
+    let lookup = Arc::new(lookup);
     log::info!(
         "sftp_task: uid/gid lookup loaded ({} uids, {} gids)",
         lookup.uid_to_name.len(),
@@ -94,6 +125,7 @@ pub(crate) async fn sftp_task(
     // Cancel tokens for running transfers — key = transfer_id.
     let cancels: ActiveTransfers = Arc::new(Mutex::new(HashMap::new()));
     let mut background_tasks = JoinSet::new();
+    let mut transfer_tasks = JoinSet::new();
 
     /// Answer a oneshot request; the requester may have given up (dropped
     /// the receiver), which is not an error worth more than a debug line.
@@ -118,6 +150,12 @@ pub(crate) async fn sftp_task(
             completed = background_tasks.join_next(), if !background_tasks.is_empty() => {
                 if let Some(Err(error)) = completed {
                     log::error!("sftp_task: background task failed: {error}");
+                }
+                None
+            }
+            completed = transfer_tasks.join_next(), if !transfer_tasks.is_empty() => {
+                if let Some(Err(error)) = completed {
+                    log::error!("sftp_task: transfer task failed: {error}");
                 }
                 None
             }
@@ -218,9 +256,22 @@ pub(crate) async fn sftp_task(
                 }
                 let sftp = Arc::clone(&sftp);
                 let cancels = Arc::clone(&cancels);
-                background_tasks.spawn(async move {
+                let tasks = if native {
+                    &mut transfer_tasks
+                } else {
+                    &mut background_tasks
+                };
+                let transport_stop = transport_stop.clone();
+                tasks.spawn(async move {
                     let _cleanup = ActiveTransferGuard::new(cancels, transfer_id);
-                    let result = sftp_upload(&sftp, &local, &remote, &events, &cancel).await;
+                    let result = if let Some(stop) = transport_stop {
+                        transfer::native_sftp_upload(
+                            &sftp, &local, &remote, &events, &cancel, &stop,
+                        )
+                        .await
+                    } else {
+                        sftp_upload(&sftp, &local, &remote, &events, &cancel).await
+                    };
                     log::info!(
                         "sftp_task: Upload #{transfer_id} finished: {}",
                         if result.is_ok() { "OK" } else { "error" }
@@ -255,9 +306,22 @@ pub(crate) async fn sftp_task(
                 }
                 let sftp = Arc::clone(&sftp);
                 let cancels = Arc::clone(&cancels);
-                background_tasks.spawn(async move {
+                let tasks = if native {
+                    &mut transfer_tasks
+                } else {
+                    &mut background_tasks
+                };
+                let transport_stop = transport_stop.clone();
+                tasks.spawn(async move {
                     let _cleanup = ActiveTransferGuard::new(cancels, transfer_id);
-                    let result = sftp_download(&sftp, &remote, &local, &events, &cancel).await;
+                    let result = if let Some(stop) = transport_stop {
+                        transfer::native_sftp_download(
+                            &sftp, &remote, &local, &events, &cancel, &stop,
+                        )
+                        .await
+                    } else {
+                        sftp_download(&sftp, &remote, &local, &events, &cancel).await
+                    };
                     log::info!(
                         "sftp_task: Download #{transfer_id} finished: {}",
                         if result.is_ok() { "OK" } else { "error" }
@@ -296,17 +360,32 @@ pub(crate) async fn sftp_task(
     }
 
     const BACKGROUND_TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+    if native {
+        // Native owner must observe every task without extending app-quit time.
+        cmd_rx.close();
+        if let Some(stop) = &transport_stop {
+            stop.cancel();
+        }
+        background_tasks.abort_all();
+    }
     let drain_tasks = async {
         while let Some(result) = background_tasks.join_next().await {
             if let Err(error) = result {
-                log::error!("sftp_task: background task failed during shutdown: {error}");
+                if !native || !error.is_cancelled() {
+                    log::error!("sftp_task: background task failed during shutdown: {error}");
+                }
             }
         }
     };
-    if tokio::time::timeout(BACKGROUND_TASK_SHUTDOWN_TIMEOUT, drain_tasks)
-        .await
-        .is_err()
-    {
+    let timed_out = if native {
+        drain_tasks.await;
+        false
+    } else {
+        tokio::time::timeout(BACKGROUND_TASK_SHUTDOWN_TIMEOUT, drain_tasks)
+            .await
+            .is_err()
+    };
+    if timed_out {
         log::warn!("sftp_task: background-task shutdown timed out; aborting remaining tasks");
         background_tasks.abort_all();
         while let Some(result) = background_tasks.join_next().await {
@@ -315,6 +394,11 @@ pub(crate) async fn sftp_task(
             {
                 log::error!("sftp_task: aborted background task failed: {error}");
             }
+        }
+    }
+    while let Some(result) = transfer_tasks.join_next().await {
+        if let Err(error) = result {
+            log::error!("sftp_task: transfer cleanup failed: {error}");
         }
     }
     cancels
@@ -363,7 +447,7 @@ mod sftp_task_tests;
 
 // `BUG-0076`: every remote file OneTerm opens gives its handle back.
 #[cfg(test)]
-mod handle_limit_tests;
+pub(crate) mod handle_limit_tests;
 
 // `BUG-0077`: a folder transfer's progress is bytes over the whole tree.
 #[cfg(test)]

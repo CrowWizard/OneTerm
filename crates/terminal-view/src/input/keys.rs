@@ -227,7 +227,7 @@ fn intercept_completion(ks: &Keystroke, ctx: KeyContext) -> Option<CompletionKey
 }
 
 /// Copy/paste chord: Cmd+key on macOS, Ctrl+Shift+key elsewhere.
-fn is_clipboard_chord(m: &Modifiers) -> bool {
+pub(crate) fn is_clipboard_chord(m: &Modifiers) -> bool {
     if cfg!(target_os = "macos") {
         m.platform && !m.shift && !m.control && !m.alt
     } else {

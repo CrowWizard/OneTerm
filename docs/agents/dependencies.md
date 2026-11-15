@@ -22,6 +22,21 @@ vendored `alacritty_terminal` / `vte` fork it replaced was deleted at `US-0087`,
 it the `[patch]` section and the CI job that proved the vendored trees were pristine
 upstream plus patches. Do not re-add either.
 
+Migration staging (`US-0208`, `DEC-0023`): `oneterm-terminal/ghostty-native`
+explicitly links a project-local, pinned libghostty-vt static build on Windows
+x86_64 MSVC. It is default-off and neither production backend selects it yet.
+The terminal adapter's build script never downloads tools or libraries; enabling
+the feature requires `GHOSTTY_VT_PREFIX` from `scripts/ghostty-vt/build.ps1`.
+The shipping application facts above remain unchanged until parity and cutover.
+US-0245's separate app native-desktop feature also uses the existing workspace
+futures dependency to await the consuming native owner result after the GUI loop
+returns. It is optional and does not enter the default shipping graph.
+The app's dev dependencies enable GPUI and gpui-component test-support for its
+actual Root/native desktop release fixture; these are not new runtime versions.
+US-0249's native-desktop feature also enables the dependency-free core
+isolated-config feature. It exposes explicit once-only storage-root selection
+for the test entry; merely compiling it does not change production paths.
+
 Rules:
 
 1. `gpui-pre` and `gpui-pre-platform` move together.

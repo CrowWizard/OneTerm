@@ -5264,6 +5264,7 @@ dependencies = [
  "crash-handler",
  "embed-resource",
  "env_logger",
+ "futures",
  "gpui-base",
  "gpui-component",
  "gpui-kit-assets",

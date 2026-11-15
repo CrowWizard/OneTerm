@@ -105,11 +105,433 @@ struct Host {
     state: Rc<RefCell<RenderState>>,
 }
 
+#[cfg(feature = "ghostty-native")]
+mod native {
+    use super::*;
+    use crate::render::frame::{CursorShape, Frame};
+    use oneterm_terminal::ghostty_bridge::{AsyncEngine, Command, Reply};
+    use std::future::Future;
+    use std::sync::Arc;
+    use std::task::{Context as TaskContext, Poll, Wake, Waker};
+
+    struct ThreadWake(std::thread::Thread);
+    impl Wake for ThreadWake {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    fn complete<F: Future>(future: F) -> F::Output {
+        let waker = Waker::from(Arc::new(ThreadWake(std::thread::current())));
+        let mut cx = TaskContext::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+        loop {
+            match future.as_mut().poll(&mut cx) {
+                Poll::Ready(value) => return value,
+                Poll::Pending => std::thread::park(),
+            }
+        }
+    }
+    fn call(engine: &AsyncEngine, command: Command) -> Reply {
+        complete(engine.request(command).unwrap().wait()).unwrap()
+    }
+
+    #[gpui::test]
+    fn native_semantic_directory_colors_match_legacy(cx: &mut TestAppContext) {
+        use oneterm_highlight::ShellProfile;
+        let text = "d-r---    2026/8/27    21:45    17 .ash_history";
+        let configured = || {
+            let mut value = inputs_without_cursor();
+            value.semantic.set_enabled(true);
+            value.semantic.set_profile(ShellProfile::PowerShell);
+            value
+        };
+        let painted = |h: &Harness<'_>| {
+            let state = h.state.borrow();
+            let plan = &state.plans.rows()[0];
+            (0..text.len())
+                .filter(|&col| text.as_bytes()[col].is_ascii_alphanumeric())
+                .map(|col| {
+                    let run = plan
+                        .text
+                        .iter()
+                        .find(|run| {
+                            usize::from(run.col) <= col && col < usize::from(run.col + run.cols)
+                        })
+                        .expect("text glyph run");
+                    let offset = col - usize::from(run.col);
+                    plan.colors_of(run)
+                        .iter()
+                        .find(|span| span.byte_end > offset as u32)
+                        .unwrap()
+                        .color
+                })
+                .collect::<Vec<_>>()
+        };
+        let expected = {
+            let mut h = Harness::open(cx, 3, 80, text, configured());
+            h.draw();
+            painted(&h)
+        };
+        assert!(expected.windows(2).any(|pair| pair[0] != pair[1]));
+        let engine = AsyncEngine::spawn(80, 3).unwrap();
+        let palette = configured().theme.palette;
+        let native_rgb = |color: oneterm_terminal::Rgb| oneterm_terminal::ghostty::render::Rgb {
+            r: color.r,
+            g: color.g,
+            b: color.b,
+        };
+        call(
+            &engine,
+            Command::DefaultColors(Box::new(oneterm_terminal::ghostty::colors::DefaultColors {
+                foreground: native_rgb(palette.foreground),
+                background: native_rgb(palette.background),
+                cursor: None,
+                palette: std::array::from_fn(|index| {
+                    native_rgb(oneterm_terminal::resolve_color(
+                        &oneterm_terminal::Color::Palette(index as u8),
+                        &palette,
+                    ))
+                }),
+            })),
+        );
+        call(&engine, Command::Feed(text.as_bytes().to_vec()));
+        call(&engine, Command::Capture);
+        let (session, probe) = FakeTerminalSession::new(3, 80, "MUST NOT PAINT");
+        let session = session.with_native_render_model(engine.model());
+        let mut h = Harness::open_session(cx, Box::new(session), probe, configured());
+        h.draw();
+        assert_eq!(painted(&h), expected);
+        h.state.borrow_mut().inputs.semantic.set_enabled(false);
+        h.draw();
+        assert_ne!(painted(&h), expected, "Off must invalidate semantic plans");
+        h.state.borrow_mut().inputs.semantic.set_enabled(true);
+        h.draw();
+        assert_eq!(painted(&h), expected);
+        for sgr in ["\x1b[31m", "\x1b[38;2;122;122;122m", "\x1b[38;5;16m"] {
+            call(
+                &engine,
+                Command::Feed(format!("\r{sgr}{text}\x1b[0m").into_bytes()),
+            );
+            call(&engine, Command::Capture);
+            h.draw();
+            let explicit = painted(&h);
+            h.state.borrow_mut().inputs.semantic.set_enabled(false);
+            h.draw();
+            assert_eq!(painted(&h), explicit, "program color preserved: {sgr:?}");
+            h.state.borrow_mut().inputs.semantic.set_enabled(true);
+        }
+        assert_eq!(h.probe.snapshot_calls(), 0);
+        complete(engine.close()).unwrap();
+    }
+
+    #[gpui::test]
+    fn native_gpui_theme_colors_apply_shared_contrast_without_changing_exact_rgb(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::render::frame::Color;
+        use oneterm_terminal::ghostty::{colors::DefaultColors, render::Rgb};
+        let engine = AsyncEngine::spawn(16, 3).unwrap();
+        let low = Rgb {
+            r: 36,
+            g: 37,
+            b: 38,
+        };
+        let background = Rgb {
+            r: 24,
+            g: 25,
+            b: 26,
+        };
+        let defaults = DefaultColors {
+            foreground: low,
+            background,
+            cursor: None,
+            palette: [low; 256],
+        };
+        call(&engine, Command::DefaultColors(Box::new(defaults.clone())));
+        call(
+            &engine,
+            Command::Feed(b"D\x1b[31mA\x1b[38;2;36;37;38mT\x1b[38;5;16mE\x1b[0m".to_vec()),
+        );
+        call(&engine, Command::Capture);
+        let (session, probe) = FakeTerminalSession::new(3, 16, "MUST NOT PAINT");
+        let session = session.with_native_render_model(engine.model());
+        let mut h = Harness::open_session(cx, Box::new(session), probe, inputs());
+        h.draw();
+        let check = |h: &Harness<'_>, fg: Color, bg: Color| {
+            let state = h.state.borrow();
+            let theme = &state.inputs.theme;
+            let exact = theme.color(Color::Rgb(36, 37, 38));
+            let adjusted = theme.ensure_contrast(theme.color(fg), theme.color(bg));
+            let colors = &state.plans.rows()[0].colors;
+            for (column, expected) in [adjusted, adjusted, exact, exact].into_iter().enumerate() {
+                let painted = colors
+                    .iter()
+                    .find(|span| span.byte_end > column as u32)
+                    .unwrap();
+                assert_eq!(painted.color, expected, "painted column {column}");
+            }
+            assert_eq!(state.frame.background(), Some(bg));
+        };
+        check(&h, Color::Rgb(36, 37, 38), Color::Rgb(24, 25, 26));
+        let mut light = defaults;
+        light.background = Rgb {
+            r: 230,
+            g: 231,
+            b: 232,
+        };
+        call(&engine, Command::DefaultColors(Box::new(light)));
+        call(&engine, Command::Capture);
+        h.draw();
+        check(&h, Color::Rgb(36, 37, 38), Color::Rgb(230, 231, 232));
+        call(
+            &engine,
+            Command::Feed(b"\x1b]10;#242526\x07\x1b]11;#18191a\x07\x1b]4;1;#242526\x07".to_vec()),
+        );
+        call(&engine, Command::Capture);
+        h.draw();
+        check(&h, Color::Rgb(36, 37, 38), Color::Rgb(24, 25, 26));
+        call(
+            &engine,
+            Command::Feed(b"\x1b]110\x07\x1b]111\x07\x1b]104;1\x07".to_vec()),
+        );
+        call(&engine, Command::Capture);
+        h.draw();
+        check(&h, Color::Rgb(36, 37, 38), Color::Rgb(230, 231, 232));
+        assert_eq!(h.probe.snapshot_calls(), 0);
+        complete(engine.close()).unwrap();
+    }
+
+    #[gpui::test]
+    fn native_gpui_prepaint_plans_cursor_selection_and_resize(cx: &mut TestAppContext) {
+        use oneterm_terminal::SnapshotUpdate;
+        use oneterm_terminal::ghostty::{
+            anchors::{Coordinate, Point, Space},
+            state::Scroll,
+        };
+        let engine = AsyncEngine::spawn(16, 3).unwrap();
+        use oneterm_terminal::ghostty::{colors::DefaultColors, render::Rgb};
+        call(
+            &engine,
+            Command::DefaultColors(Box::new(DefaultColors {
+                foreground: Rgb {
+                    r: 210,
+                    g: 211,
+                    b: 212,
+                },
+                background: Rgb {
+                    r: 12,
+                    g: 13,
+                    b: 14,
+                },
+                cursor: Some(Rgb {
+                    r: 90,
+                    g: 91,
+                    b: 92,
+                }),
+                palette: [Rgb {
+                    r: 200,
+                    g: 201,
+                    b: 202,
+                }; 256],
+            })),
+        );
+        call(&engine, Command::Feed(b"abcdef\r\nghijkl\x1b[2 q".to_vec()));
+        call(&engine, Command::Capture);
+        let model = engine.model();
+        let (session, probe) = FakeTerminalSession::new(3, 16, "LEGACY MUST NOT PAINT");
+        let session = session.with_native_render_model(model.clone());
+        let mut independent = Frame::new();
+        independent.snapshot(&session);
+        assert_eq!(independent.update(), SnapshotUpdate::Full);
+        let mut h = Harness::open_session(cx, Box::new(session), probe, inputs());
+        h.draw();
+        {
+            let state = h.state.borrow();
+            assert_eq!(state.frame.size(), GridSize { rows: 3, cols: 16 });
+            assert_eq!(state.frame.row(0).cell(0).ch, 'a');
+            assert_eq!(state.plans.rows().len(), 3);
+            assert_eq!(state.frame.cursor().shape, CursorShape::Block);
+            assert!(!state.frame.cursor().blinking);
+            let blink_off = crate::render::cursor::CursorConfig {
+                shape: None,
+                color: None,
+                focused: true,
+                blink_visible: false,
+            };
+            assert!(
+                crate::render::cursor::resolve(&state.frame, &blink_off).is_some(),
+                "a steady native cursor ignores the application blink-off phase"
+            );
+            assert_eq!((state.frame.cursor().row, state.frame.cursor().col), (1, 6));
+            assert!(state.frame.modes().is_none());
+            assert_eq!(state.frame.display_offset(), None);
+            assert_eq!(
+                state.frame.background(),
+                Some(crate::render::frame::Color::Rgb(12, 13, 14))
+            );
+        }
+        h.cx.update(|window, _| {
+            let mut state = h.state.borrow_mut();
+            let geometry = state.geometry.unwrap();
+            let cursor = state.resolve_cursor(&geometry, window).unwrap();
+            assert_eq!(
+                cursor.color,
+                state
+                    .inputs
+                    .theme
+                    .color(crate::render::frame::Color::Rgb(90, 91, 92))
+            );
+        });
+        assert_eq!(
+            h.probe.snapshot_calls(),
+            0,
+            "native prepaint must not take a legacy snapshot"
+        );
+        let stats = h.draw();
+        assert_eq!(stats.frames_unchanged, 1);
+        assert_eq!(stats.rows_planned, 0);
+        call(&engine, Command::Feed(b"\rZ".to_vec()));
+        call(&engine, Command::Capture);
+        let stats = h.draw();
+        assert_eq!(stats.rows_planned, 1);
+        assert_eq!(h.state.borrow().frame.row(1).cell(0).ch, 'Z');
+        h.host.read_with(h.cx, |host, cx| {
+            independent.snapshot(&**host.session.read(cx))
+        });
+        assert_eq!(
+            independent.update(),
+            SnapshotUpdate::Partial { scrolled: 0 }
+        );
+        assert_eq!(independent.row(1).cell(0).ch, 'Z');
+
+        let point = |column| Point {
+            space: Space::Active,
+            coordinate: Coordinate { column, row: 0 },
+        };
+        let start = complete(model.create_anchor(point(1))).unwrap();
+        let end = complete(model.create_anchor(point(3))).unwrap();
+        complete(model.set_selection(&start, &end, false)).unwrap();
+        call(&engine, Command::Capture);
+        let stats = h.draw();
+        assert_eq!(
+            stats.rows_planned, 0,
+            "selection does not rebuild glyph plans"
+        );
+        assert_eq!(
+            h.state.borrow().overlays.selection,
+            [crate::render::overlay::RowSpan {
+                row: 0,
+                col: 1,
+                cols: 3
+            }]
+        );
+        complete(model.clear_selection()).unwrap();
+        call(&engine, Command::Capture);
+        h.draw();
+        assert!(h.state.borrow().overlays.selection.is_empty());
+
+        call(
+            &engine,
+            Command::Resize {
+                cols: 8,
+                rows: 2,
+                cell_width_px: 8,
+                cell_height_px: 16,
+            },
+        );
+        call(&engine, Command::Feed(b"\r\n1\r\n2\r\n3\r\n4".to_vec()));
+        call(&engine, Command::Scroll(Scroll::Top));
+        call(&engine, Command::Capture);
+        h.draw();
+        {
+            let state = h.state.borrow();
+            assert_eq!(state.frame.size(), GridSize { rows: 2, cols: 8 });
+            assert_eq!(state.plans.rows().len(), 2);
+            assert_eq!(state.frame.cursor().shape, CursorShape::Hidden);
+        }
+        complete(engine.close()).unwrap();
+        let stats = h.draw();
+        assert_eq!(stats.frames_unchanged, 1);
+        assert_eq!(h.probe.snapshot_calls(), 0);
+    }
+
+    #[gpui::test]
+    fn native_gpui_absent_frame_and_failed_owner_never_fall_back(cx: &mut TestAppContext) {
+        let engine = AsyncEngine::spawn(8, 2).unwrap();
+        let (session, probe) = FakeTerminalSession::new(2, 8, "WRONG");
+        let session = session.with_native_render_model(engine.model());
+        let mut h = Harness::open_session(cx, Box::new(session), probe, inputs());
+        h.draw();
+        assert_eq!(h.state.borrow().frame.size(), GridSize { rows: 0, cols: 0 });
+        assert!(h.state.borrow().plans.rows().is_empty());
+        assert_eq!(h.probe.snapshot_calls(), 0);
+        call(&engine, Command::Feed(b"good\x1b[?5h".to_vec()));
+        call(&engine, Command::Capture);
+        let stats = h.draw();
+        assert_eq!(stats.rows_planned, 2);
+        assert!(h.state.borrow().frame.reverse_video());
+        let key = h.state.borrow().frame.row_key(0);
+        assert!(
+            complete(
+                engine
+                    .request(Command::Feed(b"\x1b[6n".repeat(1000)))
+                    .unwrap()
+                    .wait()
+            )
+            .is_err()
+        );
+        assert!(complete(engine.close()).is_err());
+        h.draw();
+        assert_eq!(h.state.borrow().frame.row_key(0), key);
+        assert_eq!(h.state.borrow().frame.row(0).cell(0).ch, 'g');
+        assert_eq!(h.probe.snapshot_calls(), 0);
+    }
+
+    #[test]
+    fn native_frame_source_switch_resets_reader_and_legacy_plan_damage() {
+        use oneterm_terminal::SnapshotUpdate;
+        let first = AsyncEngine::spawn(8, 2).unwrap();
+        let second = AsyncEngine::spawn(8, 2).unwrap();
+        call(&first, Command::Feed(b"first".to_vec()));
+        call(&first, Command::Capture);
+        call(&second, Command::Feed(b"second".to_vec()));
+        call(&second, Command::Capture);
+        let (legacy, probe) = FakeTerminalSession::new(2, 8, "legacy");
+        let (a, _) = FakeTerminalSession::new(2, 8, "unused");
+        let a = a.with_native_render_model(first.model());
+        let (b, _) = FakeTerminalSession::new(2, 8, "unused");
+        let b = b.with_native_render_model(second.model());
+        let mut frame = Frame::new();
+        frame.snapshot(&legacy);
+        frame.snapshot(&legacy);
+        assert_eq!(frame.update(), SnapshotUpdate::Unchanged);
+        frame.snapshot(&a);
+        assert_eq!(frame.update(), SnapshotUpdate::Full);
+        assert_eq!(frame.row(0).cell(0).ch, 'f');
+        frame.snapshot(&a);
+        assert_eq!(frame.update(), SnapshotUpdate::Unchanged);
+        frame.snapshot(&b);
+        assert_eq!(frame.update(), SnapshotUpdate::Full);
+        assert_eq!(frame.row(0).cell(0).ch, 's');
+        frame.snapshot(&legacy);
+        assert_eq!(
+            frame.update(),
+            SnapshotUpdate::Full,
+            "native plans must not survive an unchanged legacy snapshot"
+        );
+        assert_eq!(frame.row(0).cell(0).ch, 'l');
+        assert!(frame.modes().is_some());
+        assert_eq!(probe.snapshot_calls(), 3);
+        complete(first.close()).unwrap();
+        complete(second.close()).unwrap();
+    }
+}
+
 impl Render for Host {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         TerminalElement::new(TerminalElementSpec {
             id: "terminal".into(),
-            session: self.session.clone(),
+            session: super::ElementSession::Legacy(self.session.clone()),
             state: self.state.clone(),
             ime: None,
         })
@@ -156,6 +578,15 @@ impl<'a> Harness<'a> {
         inputs: RenderInputs,
     ) -> Harness<'a> {
         let (session, probe) = FakeTerminalSession::boxed(rows, cols, text);
+        Self::open_session(cx, session, probe, inputs)
+    }
+
+    fn open_session(
+        cx: &'a mut TestAppContext,
+        session: Box<dyn TerminalSession>,
+        probe: FakeSessionProbe,
+        inputs: RenderInputs,
+    ) -> Harness<'a> {
         let state = Rc::new(RefCell::new(RenderState::new(inputs)));
         let shared = state.clone();
         let (host, cx) = cx.add_window_view(move |_, cx| Host {

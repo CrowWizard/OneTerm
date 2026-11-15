@@ -63,6 +63,7 @@ fn doc(entries: Vec<(u64, SshSession)>) -> SessionDocument {
             })
             .collect(),
         next_id,
+        startup_session_id: None,
     }
 }
 

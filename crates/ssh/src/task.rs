@@ -154,3 +154,7 @@ pub(crate) async fn ssh_main_task(
 #[cfg(test)]
 #[path = "task_tests.rs"]
 mod task_tests;
+
+#[cfg(all(test, feature = "ghostty-native"))]
+#[path = "ghostty_transport_tests.rs"]
+mod ghostty_transport_tests;

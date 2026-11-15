@@ -47,14 +47,8 @@ const MIN_RIGHT_DOCK_WIDTH: gpui::Pixels = gpui::px(240.);
 /// The persisted layout this process may start from, or `None` for the fixed
 /// default layout.
 ///
-/// M1 (`DEC-0019`, `IN-0043` MAJ-2): an elevated window **does not read
-/// `docks.json` at all**. `load_layout` restores the side docks *by name*, so a
-/// saved `ssh_client` dock would be built before any gate on the
-/// layout builders could decline to build one — and declining to call
-/// `set_dock` does not remove a dock that already exists. Gating the builders
-/// was necessary and not sufficient: the restore is the path every user who has
-/// run OneTerm once actually takes, so the "default" path in practice was the
-/// broken one.
+/// Restricted windows keep a fixed startup layout and never read `docks.json`.
+/// Confirmed administrators read and persist layouts like ordinary windows.
 ///
 /// `read` is a closure so the test can prove the stronger claim — that the
 /// document is not read, rather than merely not used.
@@ -63,7 +57,7 @@ fn startup_dock_document(
     read: impl FnOnce() -> Option<oneterm_state::dock_persistence::DockDocument>,
 ) -> Option<oneterm_state::dock_persistence::DockDocument> {
     if restricted {
-        log::info!("elevated window: not reading docks.json; using the default layout");
+        log::info!("unknown process token: not reading docks.json; using the default layout");
         return None;
     }
     read()
@@ -182,11 +176,8 @@ impl OneTermWorkspace {
     /// Precondition: the composition root has initialised the shared globals
     /// (`AppState`, `UiConfig`, `AppServices`) before the window opens.
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        // An elevated window is a deliberately smaller application: local shells
-        // only, marked, and writing no configuration (`DEC-0019` M1/M4/M5). Read
-        // from the process token, never from a launch argument — and true as
-        // well when the token query itself failed, because a process that cannot
-        // prove it is ordinary is treated as though it were not.
+        // US-0259: confirmed administrators restore/persist ordinary layouts.
+        // Only an unknown token selects the restricted default-layout path.
         let elevated = oneterm_core::elevation::is_restricted();
         let (dock_area, dock_skin) =
             dock_skin::dock_area(MAIN_DOCK_ID, Some(MAIN_DOCK_VERSION), window, cx);
@@ -205,15 +196,8 @@ impl OneTermWorkspace {
         // quarantines it there. A saved `zoomed_panel` (panel zoom is gone, `US-0203`) is
         // dropped by that read and never restored.
         //
-        // M1 (`DEC-0019`, `IN-0043` MAJ-2): an elevated window does not read it
-        // at all. `load_layout` restores the **side docks by name**, so a saved
-        // `ssh_client` dock would be built here — before any gate on
-        // the layout builders can decline to build one — and then left in place,
-        // because declining to call `set_dock(Right, ..)` does not remove a dock
-        // that is already there. Gating the builders was necessary and not
-        // sufficient: the restore is the path every user who has run OneTerm
-        // once actually takes. An elevated window therefore gets the fixed
-        // default layout, every time, with no saved width.
+        // Retain the restricted process's fixed startup layout. SSH access is
+        // explicit and no saved panel tree or width is restored under its token.
         let document = startup_dock_document(elevated, || {
             persistence::read_dock_document().unwrap_or_else(|error| {
                 log::warn!("{error}; using the default layout");

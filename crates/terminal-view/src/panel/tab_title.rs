@@ -22,7 +22,7 @@ use gpui_component::{
     ActiveTheme as _, ElementExt as _, Icon, IconName, Sizable as _, Size, WindowExt as _,
     button::{Button, ButtonVariant, ButtonVariants as _},
     dialog::{DialogButtonProps, DialogFooter},
-    dock::ClosePanel,
+    dock::{ClosePanel, DragPanel},
     h_flex,
     input::{Input, InputState},
     menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem},
@@ -68,9 +68,7 @@ impl TerminalPanel {
         if !self.tree.is_single() {
             return None;
         }
-        self.tree
-            .active_terminal()
-            .and_then(|view| view.read(cx).program_status())
+        self.tree.active_terminal().and_then(|view| view.status(cx))
     }
 
     /// The glyph a collapsed cell shows for the shell the tab's active Space runs (see
@@ -79,7 +77,8 @@ impl TerminalPanel {
         let view = self.tree.active_terminal();
         shell_icon(
             view.as_ref()
-                .and_then(|view| view.read(cx).duplicate_config.as_ref()),
+                .and_then(|view| view.duplicate_config(cx))
+                .as_ref(),
         )
     }
 
@@ -89,14 +88,9 @@ impl TerminalPanel {
     fn shows_recording_dot(&self, cx: &App) -> bool {
         self.tree.is_single()
             && self.tree.active_terminal().is_some_and(|view| {
-                view.read(cx)
-                    .session
-                    .read(cx)
-                    .capabilities()
-                    .logging
-                    .is_some_and(|logging| {
-                        matches!(logging.state(), TerminalLogState::Running { .. })
-                    })
+                view.capabilities(cx).logging.is_some_and(|logging| {
+                    matches!(logging.state(), TerminalLogState::Running { .. })
+                })
             })
     }
 }
@@ -691,10 +685,52 @@ pub(super) fn render_tab_strip(
             })
     };
 
+    let visible = Rc::new(Cell::new(Bounds::<Pixels>::default()));
+    let measured_visible = visible.clone();
     row.id(title_row_id)
         .debug_selector(|| TAB_ROW_SELECTOR.to_string())
         .relative()
         .h_full()
+        .on_prepaint(move |bounds, window, _| {
+            measured_visible.set(bounds.intersect(&window.content_mask().bounds));
+        })
+        // Reveal another terminal tab without consuming the dock's drag:
+        // the same pointer gesture can continue into its empty split Space.
+        .on_drag_move({
+            let panel = panel_entity.downgrade();
+            move |event: &gpui::DragMoveEvent<DragPanel>, window, cx| {
+                if !event.bounds.contains(&event.event.position)
+                    || !visible.get().contains(&event.event.position)
+                {
+                    return;
+                }
+                let Some(target) = panel.upgrade() else {
+                    return;
+                };
+                let Some(source) = TerminalPanel::dragged_by(event.drag(cx), cx) else {
+                    return;
+                };
+                if source == target {
+                    return;
+                }
+                let Some(group) = target
+                    .read(cx)
+                    .tab_panel
+                    .as_ref()
+                    .and_then(|group| group.upgrade())
+                else {
+                    return;
+                };
+                let index = group
+                    .read(cx)
+                    .panels()
+                    .iter()
+                    .position(|held| held.view().entity_id() == target.entity_id());
+                if let Some(index) = index {
+                    group.update(cx, |group, cx| group.select_tab(index, window, cx));
+                }
+            }
+        })
         // A collapsed cell has no room for the title, directory or chips, so a hover card with
         // the expanded row's content carries them.
         .when(collapsed, |this| {

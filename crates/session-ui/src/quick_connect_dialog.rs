@@ -122,6 +122,7 @@ impl QuickConnectHops {
 
 enum QuickConnectMode {
     New,
+    Here(SshDuplicateCompletion),
     Duplicate {
         config: SshDuplicateConfig,
         initial_cwd: Option<std::path::PathBuf>,
@@ -175,6 +176,17 @@ pub fn open_quick_connect_dialog(window: &mut Window, cx: &mut App) {
     open_quick_connect_dialog_internal(QuickConnectMode::New, window, cx);
 }
 
+/// Collect credentials normally, then hand the connection to its captured destination.
+pub fn open_quick_connect_to(
+    completion: SshDuplicateCompletion,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if oneterm_actions::action_allowed_when_elevated("new_ssh_session") {
+        open_quick_connect_dialog_internal(QuickConnectMode::Here(completion), window, cx);
+    }
+}
+
 /// Open the SSH Duplicate Session dialog with non-secret fields prefilled.
 pub fn open_duplicate_ssh_dialog(
     config: SshDuplicateConfig,
@@ -185,9 +197,8 @@ pub fn open_duplicate_ssh_dialog(
 ) {
     // The fourth `session-ui` entry point, for consistency with the rule the
     // policy table states about itself: "unreachable" is a property of the
-    // current layout, and this is a property of the action. No SSH tab can exist
-    // in an elevated window today, so nothing reaches here — but that is exactly
-    // the reasoning the table rejects for the `sftp_*` ids (`IN-0043` NEW-3).
+    // current layout, and this is a property of the action. Confirmed
+    // administrators can duplicate live SSH connections, but unknown tokens cannot.
     if !oneterm_actions::action_allowed_when_elevated("new_ssh_session") {
         log::info!("elevated window: refusing to duplicate an SSH session");
         return;
@@ -205,8 +216,10 @@ pub fn open_duplicate_ssh_dialog(
 
 fn open_quick_connect_dialog_internal(mode: QuickConnectMode, window: &mut Window, cx: &mut App) {
     let is_duplicate = matches!(mode, QuickConnectMode::Duplicate { .. });
+    let may_save = !is_duplicate && !oneterm_core::elevation::is_restricted();
     let (prefill, initial_cwd, completion) = match mode {
         QuickConnectMode::New => (None, None, None),
+        QuickConnectMode::Here(completion) => (None, None, Some(completion)),
         QuickConnectMode::Duplicate {
             config,
             initial_cwd,
@@ -366,7 +379,7 @@ fn open_quick_connect_dialog_internal(mode: QuickConnectMode, window: &mut Windo
             // store — only once the connection succeeded (CORR-54), so a typo
             // never becomes a saved session.
             let on_connected: Option<Rc<dyn Fn(&mut Window, &mut App)>> =
-                save_session.get().then(|| {
+                (may_save && save_session.get()).then(|| {
                     let session = SshSession {
                         label: target.label(),
                         host: target.host.clone(),
@@ -497,7 +510,7 @@ fn open_quick_connect_dialog_internal(mode: QuickConnectMode, window: &mut Windo
                 })
                 .child(auth_form.render(true, cx))
                 .when_some(
-                    save_session_option(is_duplicate, save_session.clone()),
+                    save_session_option(!may_save, save_session.clone()),
                     |content, option| content.child(option),
                 )
                 // The failure of the last attempt, under the fields it is about.
@@ -562,6 +575,61 @@ fn resolve_target(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::{Context, Focusable as _, Render, TestAppContext};
+    use gpui_component::{FocusableExt as _, Root};
+
+    struct InputBorderView {
+        input: gpui::Entity<InputState>,
+        other: gpui::FocusHandle,
+    }
+
+    impl Render for InputBorderView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            use gpui::InteractiveElement as _;
+            div().w(gpui::px(400.)).child(
+                div()
+                    .track_focus(&self.other)
+                    .child(Input::new(&self.input)),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn quick_connect_single_edge_preserves_focus_and_typing(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            gpui_component::Theme::global_mut(cx).focus_ring = false;
+        });
+        let input_probe = Rc::new(RefCell::new(None));
+        let probe = input_probe.clone();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let input = cx.new(|cx| InputState::new(window, cx));
+            *probe.borrow_mut() = Some(input.clone());
+            let view = cx.new(|cx| InputBorderView {
+                input,
+                other: cx.focus_handle(),
+            });
+            Root::new(view, window, cx)
+        });
+        let input = input_probe.borrow().clone().unwrap();
+        cx.update(|window, cx| {
+            assert!(Input::new(&input).is_focus_ring_enabled());
+            assert!(!cx.theme().focus_ring);
+            input.read(cx).focus_handle(cx).focus(window, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            assert!(input.read(cx).focus_handle(cx).is_focused(window));
+            assert!(Input::new(&input).is_focus_ring_enabled());
+            assert!(!cx.theme().focus_ring);
+        });
+        cx.simulate_input("server.example.com");
+        cx.run_until_parked();
+        assert_eq!(
+            input.read_with(cx, |input, _| input.value().to_string()),
+            "server.example.com"
+        );
+    }
 
     fn target(username: &str, host: &str, port: u16) -> ConnectTarget {
         ConnectTarget {

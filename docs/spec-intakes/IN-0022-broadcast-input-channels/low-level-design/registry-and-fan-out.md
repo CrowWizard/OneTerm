@@ -31,7 +31,9 @@ the same way `ShellKind` serves `AddPanelWithShell`.
 like `AgentRegistry::init`):
 
 ```text
-pub struct Member { channel: InputChannel, session: Entity<Box<dyn TerminalSession>>, joined: u64 }
+pub enum ChannelTarget { Session(Entity<Box<dyn TerminalSession>>), Receiver(ChannelReceiver) }
+pub type ChannelReceiver = Rc<dyn Fn(BroadcastInput<'_>, &mut App)>;
+pub struct Member { channel: InputChannel, session: ChannelTarget, joined: u64 }
 pub struct InputChannelRegistry { members: HashMap<EntityId, Member>, next_seq: u64 }
 ```
 
@@ -41,7 +43,12 @@ pub struct InputChannelRegistry { members: HashMap<EntityId, Member>, next_seq: 
 - `leave(id, cx) -> bool`: remove; notify only when something was removed.
 - `close(channel, cx) -> usize`: remove every member of that channel; returns the count.
 - `channel_of(id) -> Option<InputChannel>`.
-- `members(channel) -> Vec<(EntityId, Entity<Box<dyn TerminalSession>>)>` sorted by `joined`.
+- `members(channel) -> Vec<(EntityId, ChannelTarget)>` sorted by `joined`.
+- `join_receiver(id, channel, callback, cx)` uses the same ordering and membership
+  rules. Native callbacks capture only a weak pane entity, not a native session.
+- `membership_token(id) -> Option<(InputChannel, u64)>` identifies enrollment.
+  Leave/rejoin and channel moves invalidate delayed origin work; joining the
+  same channel without leaving preserves its token and order.
 - `channels_in(ids: &[EntityId]) -> Vec<InputChannel>`: distinct channels, sorted A..E (feeds
   the tab chips).
 - `fan_out(origin, input, cx)`: `channel_of(origin)` or return; for every member of that
@@ -75,6 +82,36 @@ drops), so a Space whose session ended is no longer a member (`US-0200`).
 
 ## Interfaces
 
+### Explicit native workspace staging
+
+US-0249 generalizes peer targets without changing production engine selection.
+Legacy targets retain the synchronous operations above. Receiver targets invoke
+their callback in the same join order; native callbacks admit owned input into
+one inbox bounded to 64 queued items and 4 MiB including active payload.
+Bytes/Text/Interrupt use acknowledged raw-visible input without paste encoding;
+Paste uses the recipient's native mode and policy. Endpoint control/payload
+budgets and fail-stop cancellation remain authoritative. Peer failure is
+visible and does not prevent healthy peers receiving input. Inbox processing
+never recursively invokes origin fan-out.
+
+Bound native surfaces serialize keys, committed text, paste and releases. Key
+encoding occurs only at the origin; its receipt is broadcast only after one
+successful original-FIFO write. Text and paste also await original success;
+Ctrl+C broadcasts Interrupt. Empty encodings and releases/blur emit no peer
+input. Successfully admitted presses retain their original release even if
+their encoding was empty. Origin queues admit 64 queued items and at most
+4 MiB including active payload. Rejected releases stay held for explicit
+key-up/blur cleanup, not implicit write retry. Each queued request snapshots
+its enrollment token; only an unchanged token may fan out after acknowledgment.
+Leave, close, move or leave/rejoin therefore cannot redirect old input. Surface
+release cancels the queue, preserving backend fail-stop cancellation for admitted
+work. Registry membership retains no native owner.
+
+Tagged panel menus/actions use actual pane IDs; active-Space and tab-wide
+semantics remain unchanged. Native membership leaves on exit, close, shutdown
+and release; ended panes cannot rejoin. Unbound standalone native surfaces
+retain their direct input paths.
+
 ```text
 // oneterm-state
 impl InputChannelRegistry {
@@ -86,7 +123,10 @@ impl InputChannelRegistry {
     pub fn leave(&mut self, id: EntityId, cx: &mut Context<Self>) -> bool;
     pub fn close(&mut self, channel: InputChannel, cx: &mut Context<Self>) -> usize;
     pub fn channel_of(&self, id: EntityId) -> Option<InputChannel>;
-    pub fn members(&self, channel: InputChannel) -> Vec<(EntityId, Entity<Box<dyn TerminalSession>>)>;
+    pub fn join_receiver(&mut self, id: EntityId, channel: InputChannel,
+                         receiver: ChannelReceiver, cx: &mut Context<Self>);
+    pub fn membership_token(&self, id: EntityId) -> Option<(InputChannel, u64)>;
+    pub fn members(&self, channel: InputChannel) -> Vec<(EntityId, ChannelTarget)>;
     pub fn channels_in(&self, ids: &[EntityId]) -> Vec<InputChannel>;
     pub fn fan_out(&self, origin: EntityId, input: BroadcastInput<'_>, cx: &mut App);
 }

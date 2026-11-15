@@ -1,5 +1,194 @@
 # Terminal Backend Design — OneTerm
 
+Migration staging (IN-0057 / US-0208, DEC-0023): the accepted application target is
+libghostty-vt. The pinned Windows native library and headless C/Rust ownership
+probes now pass. The adapter's explicit `ghostty-native` feature compiles its
+thread-confined native owner; it is **not** a backend selector and is off by
+default. Neither shared pump nor renderer has switched, so the shipping-engine
+description below still applies. See
+[`spec-intakes/IN-0057-ssh-access-and-startup/low-level-design/ghostty-engine.md`](spec-intakes/IN-0057-ssh-access-and-startup/low-level-design/ghostty-engine.md)
+for cutover blockers and ownership rules. No production stream runs two engines.
+
+US-0252 adds optional same-connection SFTP to that isolated native workspace.
+NativeSession capabilities forward the existing backend, cwd and network
+counters through TerminalPane into workspace-scoped active state; local and
+empty Spaces do not inherit remote services. Optional setup runs under the
+existing phase cancellation/deadline. Native shutdown cancels an owned stream,
+aborts metadata requests, drains transfers without skipping staging cleanup and
+observes the library's split transport destruction. Existing close budgets and
+legacy SFTP drain policy stay unchanged. A disconnected server may retain an
+upload temporary sibling; failures are logged, never silently called success.
+Loopback proofs do not establish external-server desktop UAT.
+
+US-0251 wires manual direct native SSH in the isolated real workspace. The
+tagged factory shares existing trust/authentication, PTY/environment/bootstrap
+and keepalive orchestration; NativeSshSession exposes one native owner and one
+reliable event receiver, not a legacy render facade. Pending attempts are
+cancelled at workspace shutdown and remain observed until placement or cleanup.
+Unplaced connections drain events independently and retain consuming completion
+in close snapshots, including missing duplicate targets and initial-CWD failure.
+Orderly shutdown seals admission and drains accepted work; hard close can
+interrupt blocked delivery. Failed or cancelled cleanup never becomes success.
+Five-second pane/window and 200-ms application-quit budgets are unchanged. Native
+OSC 52 callbacks remain disabled even when remote clipboard policy allows them;
+explicit user clipboard handling is separate. Production selection is unchanged.
+
+US-0244 adds independent-surface search over the real local/SSH control FIFOs.
+Ctrl+F, a 150-ms debounced input, partial/complete counts, next/previous and Esc
+use one serial UI driver; supersession never cancels an admitted endpoint future.
+Needles cap at 4096 UTF-8 bytes before admission, returned matches at 4096, and
+one query at 64 progress operations. Only ASCII case-insensitive native semantics
+are offered. Live dispatcher revisions reject stale coordinates even before a
+new viewport publishes; prepaint rechecks exact frame provenance. Reveal tokens
+are checked at owner execution, then native absolute scroll captures and refreshes
+coordinates. Refresh resets the active index. Clear/close hide immediately and
+drive native clear in order. Native internal search allocation is not bounded by
+the response cap. This remains staging code pending checks and desktop acceptance;
+neither production selector changes.
+
+US-0229/0230 extend the explicit default-off local staging endpoint with bounded
+key/mouse/resize controls and NativeLocalSession. Native/physical resize precedes
+capture; controls run between bounded read batches even during continuous output.
+The session reuses guarded shell option construction and caller security policy,
+owns one event receiver and implements TerminalLifecycle only. Native frames and
+typed input remain explicit; it is not a full TerminalSession or factory cutover.
+Legacy rendering, selection/search, IME, logging and remaining semantic/
+security parity still require adaptation before production selection.
+
+US-0231 adds explicit acknowledged async paste to the staging local session.
+The control FIFO reads live native mode and reuses the existing 1-MiB paste
+policy; a separate 4-MiB pending/active text budget complements its 64 slots.
+Success means original transport FIFO admission, not child receipt. Cancelling
+after admission independently closes; already enqueued bytes cannot be retracted.
+No capture is required for paste acknowledgment. US-0232 extends that same
+contract to explicit direct NativeChannel SSH: shared policy/live mode, 64-slot
+controls plus separate 4-MiB text budget, typed FIFO acknowledgment and independent
+cancellation close. Direct authentication/trust and connection ownership do not
+change. Neither seam is production input, IME or clipboard-family OSC parity.
+
+US-0233 adds explicit queued viewport scrolling to NativeLocalSession and direct
+NativeChannel. Top/bottom/native signed delta/absolute row execute in the same
+64-slot control FIFO. Admission is not capture completion. The pump delivers
+prior reliable events, changes the native viewport, publishes an owned frame and
+posts the existing coalesced repaint without needing more process/network output.
+The consumer still releases repaint hints. Low-level SharedModel::scroll alone
+does not publish; session UI must use the backend path. Native wheel policy,
+auto-bottom behavior and production content/render integration remain open.
+
+US-0234 adds acknowledged `update_selection(Update)` to both explicit native
+endpoints (and local session forwarding). Set/clear share the 64-slot control
+FIFO; the owner delivers prior reliable events, applies tracked-anchor selection,
+captures selected cells and posts a coalesced repaint without more child/peer
+output. Success confirms publication, not physical paint. Typed selection
+rejections retain the prior selection/frame and keep the owner usable; other pump
+failures acknowledge the original error before fail-stop. Unpolled futures do
+nothing, QueueFull/Closed reject before admission, and post-admission cancellation
+requests independent close without rollback/replay. Low-level SharedModel
+selection mutation remains publication-free; bounded selection_text performs no
+clipboard I/O. US-0243 connects linear drag in the independent native surface;
+production cutover remains open. This is not the complete TerminalSession contract.
+
+US-0235 adds acknowledged `set_default_colors(DefaultColors)` to both explicit
+native endpoints and the local session adapter. Callers supply foreground,
+background, optional cursor and all 256 palette entries. The same control FIFO
+delivers prior reliable events, changes native defaults without synthetic parser
+bytes, then captures/repaints. Program OSC overrides survive default changes;
+native OSC resets reveal the latest defaults and queries reply through the
+originating transport. Partial setter failure is fatal, never a false rollback.
+Production 16-to-256 theme mapping, the color-scheme callback and full dynamic
+color/session facade remain unimplemented. A real local experiment did not make
+OSC 110 reset effective through ConPTY; native reset proof is not local end-to-end
+reset compatibility. Production selectors and GUI rendering remain unchanged.
+
+US-0240 connects native surface three-button press/motion/release through typed
+SurfaceSession admission on the original local/SSH input FIFO. US-0241 also admits
+bounded vertical wheel events through that FIFO. One live owner operation selects
+mouse wheel presses, alternate-scroll cursor keys (mode 1007), or primary history;
+Shift and already-scrolled primary history bypass reporting. The pump flushes
+reliable events first, writes native bytes through the original transport FIFO,
+and publishes/repaints history changes without new child output. Byte-only/no-op
+routes do not capture. Surface line fractions accumulate, whole steps cap at ten
+per event, excess whole steps drop and errors never retry. Geometry gaps/blur
+clear fractions. Settings binding, horizontal wheel and desktop UAT remain open.
+
+US-0242 adds native clipboard copy and visible paste to the independent surface.
+Copy asynchronously formats the existing live native selection (1 MiB limit);
+absent/empty selection preserves the clipboard. One edit task admits at a time;
+busy errors surface without replay, held clipboard chords are consumed. Paste
+uses the same bounded local/SSH FIFO and paste reservation, validates and encodes
+with live native mode, flushes reliable events, then reveals/captures/repaints
+before transport admission. Empty original text and policy rejection do not
+scroll/write. Low-level paste stays capture-free. Plain mode only normalizes
+newlines; bracketed mode strips embedded markers, ESC and ETX. Search navigation,
+context-menu/broadcast policy and desktop UAT remain open. This does not select a
+production engine.
+
+US-0243 connects linear left drag through the existing acknowledged selection FIFO
+on both real SurfaceSession endpoints. Reporting-off or Shift selects locally.
+Samples use last-painted geometry/viewport and an opaque source/grid revision;
+output, resize and scrolling invalidate coordinates, while selection-only captures
+retain the revision. The owner tracks one start anchor and releases temporary ends
+and the start on finish. One surface task coalesces motion into one pending sample
+with a separate finish bit. Outside release/blur preserves the last valid sample;
+teardown signals finish and detaches that task for idle-anchor cleanup. Copy uses
+the resulting bounded native selection. Word/line/rectangle selection, select-all,
+off-grid autoscroll, search UI and real desktop drag acceptance remain open.
+
+Pointer reporting retains fractional grid
+positions convert to device pixels with the prepaint cell metrics; padding,
+absent and differently sized publications do not supply invented coordinates.
+Live native owner encoding chooses mouse modes. Shift bypasses press/motion;
+admitted presses retain a once-only release obligation even outside the control
+or after Shift/resize, with last valid coordinates when needed. Errors are
+observable without retry. This is reporting, not local selection, menu/
+clipboard parity or a production selector. Desktop focus/blur UAT remains open.
+
+US-0239 adds an opt-in NativeTerminalSurface with no legacy TerminalSession.
+NativeLocalSession and NativeChannel implement the same SurfaceSession for typed
+grid/cell resize, owner-encoded keys, session IME and repaint-hint release. Its
+damage-free Query retains one atomic published viewport/state, never captures or
+consumes damage. The existing element accepts this native source directly. Plain
+primary text belongs to IME; alternate-screen text belongs to native keys, with
+no second commit. Layout text never invents a physical key. Composition owns
+candidate keys and reports typed rejection. Candidate ranges conservatively
+anchor at the native cursor; exact preedit layout/inline painting remain open.
+The caller retains lifecycle, reliable events/security and explicit invalidation.
+Headless proof does not prove the real-window focus/blur subscription. Full panel,
+shortcuts/broadcast, selection/search/paste/mouse/history and production cutover
+remain open; this minimal surface is not a complete legacy session facade.
+
+US-0238 routes the actual GPUI Frame/prepaint/PlanCache/cursor/selection pipeline
+through an optional native TerminalRender source. Its persistent Content supplies
+native rows, damage, cursor and exact spans, including captured padding/cursor
+colors. Native steady cursors are not hidden by application blink. Empty/failed/
+closed publication and asynchronous resize never read stale legacy snapshots.
+Native legacy-mode keyboard encoding and ordered-history gutter labels are
+unavailable, rather than fabricated. Headless tests use a fake session carrying
+a real native model; complete native backend TerminalSession, interaction wiring,
+graphics/history/parity and production factory selection remain open.
+
+US-0237 adds native RenderSource/Content/Viewport shared by the explicit local
+session and direct SSH endpoint. Each consumer owns independent damage and reads
+rows, cursor, raw native modes, scrollbar, effective colors and selection spans
+from one immutable prepared publication. No capture, repaint ack, legacy RowId or
+lossy ModeSnapshot is introduced by queries. Bounded row windows are damage-free;
+closed/failed state retains last-good content. Real endpoint and existing scanner
+proof passes, but full GPUI frame/session wiring and production cutover remain open.
+
+US-0236 adds session-owned IME preedit and typed raw-text commit to explicit
+NativeLocalSession and NativeChannel. Preedit edits do not feed a parser or paint;
+callers request redraw. Preedit/single commit each reject over 1 MiB UTF-8 before
+mutation/admission. Valid commit clears preedit then writes exact UTF-8 once to
+the original raw-input FIFO, not paste; QueueFull/Closed are observable without
+retry or automatic shutdown. Admission does not confirm child receipt. Native
+local ASCII/SSH Unicode byte proof passes. A follow-up strict local ReadConsoleW
+fixture receives exact combining/Japanese and supplementary-plane UTF-16 units.
+In a same-session comparison, .NET Console.ReadLine still returns wrong codepoints
+with explicit UTF-8 input encoding. The reproduced discrepancy is downstream of
+available native Unicode input; complete runtime/host compatibility remains open,
+and no production encoding workaround or precise runtime attribution is inferred.
+No shipping TerminalIme trait, GPUI candidate/range logic or selector changes.
+
 > **Status (2026-08):** design record kept current with the implementation. Rust
 > blocks are design sketches (types/fields are abridged); the "Current
 > implementation" notes and §5.3/§6.5/§7 describe the code as it is. Authoritative
@@ -457,6 +646,13 @@ Resolving `ShellKind` → executable + args + env (Windows-first):
 > `program`, add `args`, set `cwd`, toggle `utf8`, and configure local/SSH output logging. Persisted in `terminal.json` via `oneterm_settings::TerminalConfig`; see [`terminal-logging.md`](terminal-logging.md).
 
 #### 6.1.1 Elevated windows resolve their shell from a trusted table
+
+US-0259 amendment (2026-11-15): the historical restrictions in this subsection
+now apply only when token status is Unknown. Confirmed administrator tabs resolve
+configured programs, arguments, environment, cwd and logging exactly like ordinary
+tabs. The explicit Run as administrator launcher still accepts only the closed
+Windows Shell vocabulary and verifies its requested executable in the new process.
+Token identity and title marking are unchanged; no UAC/OS boundary is bypassed.
 
 An **elevated** OneTerm process does not use the table above. `resolve_shell` asks
 `oneterm_core::config::elevation` first, and that module builds the spawn configuration from

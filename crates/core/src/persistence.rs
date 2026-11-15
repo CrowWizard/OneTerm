@@ -213,7 +213,7 @@ pub fn remove_document(path: &Path) -> io::Result<()> {
     if crate::config::elevation::is_restricted() {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "an elevated OneTerm window writes no configuration",
+            "configuration writes require a verified process token",
         ));
     }
     let _lock = InterProcessLock::acquire(path)?;

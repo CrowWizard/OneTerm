@@ -13,11 +13,11 @@ use std::sync::Arc;
 use gpui::{App, Entity, Window};
 use gpui_component::dock::{DockArea, PanelView};
 use oneterm_core::{SessionDuplicateConfig, ShellKind, SshDuplicateConfig};
-use oneterm_terminal::TerminalSession;
+use oneterm_terminal::CreatedSession;
 
 /// Receives a freshly authenticated SSH duplicate for destination-aware placement.
 pub type SshDuplicateCompletion =
-    Rc<dyn Fn(Box<dyn TerminalSession>, String, SessionDuplicateConfig, &mut Window, &mut App)>;
+    Rc<dyn Fn(CreatedSession, String, SessionDuplicateConfig, &mut Window, &mut App)>;
 
 /// The saved SSH sessions as the "+" (New Terminal) menu lists them: sections of
 /// `(group name, rows)`, each row `(stable session id, title, hex colour)`. The
@@ -42,6 +42,8 @@ pub struct WorkspaceCommands {
     /// save). Named after the dialog it opens, not after the action that
     /// reaches it (`US-0114`).
     pub open_quick_connect_dialog: fn(&mut Window, &mut App),
+    /// Quick Connect with an explicit authenticated-session destination.
+    pub open_quick_connect_to: fn(SshDuplicateCompletion, &mut Window, &mut App),
     /// Open the full **New SSH Session** dialog — label, colour, group, jump
     /// host, port forwards, logging. The same dialog the session tree opens;
     /// the "+" menu reaches it through this pointer (`US-0114`).
@@ -56,6 +58,8 @@ pub struct WorkspaceCommands {
     /// Open the connect dialog for the saved SSH session with that stable id.
     /// A session deleted since the list was read is a no-op.
     pub open_saved_ssh_session: fn(u64, &mut Window, &mut App),
+    /// Saved-session authentication with an explicit destination.
+    pub open_saved_ssh_session_to: fn(u64, SshDuplicateCompletion, &mut Window, &mut App),
     /// Prompt for authentication and duplicate an SSH session at the requested cwd.
     pub open_duplicate_ssh_dialog:
         fn(SshDuplicateConfig, Option<PathBuf>, SshDuplicateCompletion, &mut Window, &mut App),

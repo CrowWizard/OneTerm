@@ -11,6 +11,9 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+isolated-config = []
+
 [dependencies]
 async-channel.workspace = true
 thiserror.workspace = true

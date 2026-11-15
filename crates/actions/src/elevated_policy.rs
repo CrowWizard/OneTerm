@@ -1,7 +1,9 @@
 //! Which actions an elevated OneTerm window may run (`DEC-0019` M1, `IN-0043`).
 //!
-//! M1 removes SSH, SFTP and saved sessions from the elevated
-//! instance. Removing the *rows* that reach them is not the same as removing the
+//! Confirmed administrators have ordinary functionality (US-0259). The action
+//! classification below remains the fail-closed policy for Unknown tokens.
+//! Removing the *rows* that
+//! reach a denied operation is not the same as removing the
 //! *actions*: a key binding dispatches straight to the handler, and
 //! `new_ssh_session` ships bound to `ctrl-shift-n` as a global binding, so the
 //! Quick Connect dialog opened in an elevated window with no row involved.
@@ -11,27 +13,21 @@
 //! **exhaustive**: every id in `BINDABLE_ACTIONS` must appear, and
 //! `settings-ui`'s `every_bindable_action_is_classified_for_an_elevated_window`
 //! fails when one does not. A new action cannot slip through silently; somebody
-//! has to decide which side of M1 it is on.
+//! has to decide which side of the elevation policy it is on.
 //!
 //! This crate is the home because it owns the action vocabulary and sits below
 //! every crate that dispatches one — `workspace`, `settings-ui`, `session-ui`
 //! and `sftp-ui` are all on layer 3 and may not name each other (R2/R5).
 
-/// Action ids an elevated window must not run: everything that reaches SSH,
-/// SFTP or the saved-session store.
+/// Saved-session mutation actions denied for Unknown tokens only.
 ///
 /// Keep sorted, and keep the reason obvious from the id.
-const DENIED_WHEN_ELEVATED: &[&str] = &[
-    // The saved-session surfaces. `new_ssh_session` is the one that shipped
-    // reachable: `ctrl-shift-n`, global context, straight into Quick Connect.
-    "delete_session",
+const DENIED_WHEN_ELEVATED: &[&str] = &["delete_session", "session_property"];
+
+/// Explicit network operations require a known token status, but not an ordinary token.
+const NETWORK_ACTIONS: &[&str] = &[
     "new_ssh_session",
     "open_session",
-    "session_property",
-    // The SFTP browser's context menu. Under M1 there is no SFTP panel in an
-    // elevated window, so these are unreachable by construction today; they are
-    // listed anyway, because "unreachable" is a property of the current layout
-    // and this is a property of the action.
     "sftp_delete",
     "sftp_download",
     "sftp_new_folder",
@@ -41,12 +37,11 @@ const DENIED_WHEN_ELEVATED: &[&str] = &[
     "sftp_rename",
     "sftp_upload_files",
     "sftp_upload_folder",
-    // The right dock is the SSH Client panel, and an elevated window has none.
     "toggle_right_dock",
 ];
 
 /// Action ids an elevated window may run: the terminal, the window chrome and
-/// the local-shell surfaces M1 deliberately keeps.
+/// the local-shell surfaces. Network actions are classified separately above.
 ///
 /// Listed rather than defaulted to "allowed", so the exhaustiveness test has
 /// something to check against and a new action fails until it is classified.
@@ -55,9 +50,7 @@ const ALLOWED_WHEN_ELEVATED: &[&str] = &[
     "close_input_channel",
     "close_panel",
     "close_space",
-    // Reopens the *active tab's* live session. In an elevated window every tab
-    // is a local shell — there is no route to an SSH one — so this duplicates a
-    // local shell, which is the thing an elevated window is for.
+    // Reopens the active live connection; does not modify saved sessions.
     "duplicate_session",
     "find",
     "join_input_channel_a",
@@ -93,7 +86,7 @@ pub fn action_classified_for_elevated_window(action_id: &str) -> Option<bool> {
     if DENIED_WHEN_ELEVATED.contains(&action_id) {
         return Some(false);
     }
-    if ALLOWED_WHEN_ELEVATED.contains(&action_id) {
+    if ALLOWED_WHEN_ELEVATED.contains(&action_id) || NETWORK_ACTIONS.contains(&action_id) {
         return Some(true);
     }
     None
@@ -101,17 +94,27 @@ pub fn action_classified_for_elevated_window(action_id: &str) -> Option<bool> {
 
 /// Whether `action_id` may run given this process's elevation.
 ///
-/// Unelevated: everything, unchanged. Elevated: the table above, with an
-/// unclassified id denied.
+/// Confirmed ordinary/elevated tokens: everything. Unknown: the restrictive
+/// table above, with unclassified ids and network operations denied.
 pub fn action_allowed_when_elevated(action_id: &str) -> bool {
-    if !oneterm_core::elevation::is_restricted() {
+    action_allowed_for_elevation(action_id, oneterm_core::elevation::elevation())
+}
+
+fn action_allowed_for_elevation(
+    action_id: &str,
+    elevation: oneterm_core::elevation::Elevation,
+) -> bool {
+    if !elevation.is_restricted() {
         return true;
+    }
+    if elevation.unknown_reason().is_some() && NETWORK_ACTIONS.contains(&action_id) {
+        return false;
     }
     match action_classified_for_elevated_window(action_id) {
         Some(allowed) => allowed,
         None => {
             log::warn!(
-                "action {action_id:?} is not classified for an elevated window; refusing it"
+                "action {action_id:?} is not classified for an unknown process token; refusing it"
             );
             false
         }
@@ -131,11 +134,14 @@ mod tests {
     fn every_id_is_classified_exactly_once() {
         for id in DENIED_WHEN_ELEVATED {
             assert!(
-                !ALLOWED_WHEN_ELEVATED.contains(id),
+                !ALLOWED_WHEN_ELEVATED.contains(id) && !NETWORK_ACTIONS.contains(id),
                 "{id} is in both tables"
             );
         }
-        for table in [DENIED_WHEN_ELEVATED, ALLOWED_WHEN_ELEVATED] {
+        for id in NETWORK_ACTIONS {
+            assert!(!ALLOWED_WHEN_ELEVATED.contains(id));
+        }
+        for table in [DENIED_WHEN_ELEVATED, ALLOWED_WHEN_ELEVATED, NETWORK_ACTIONS] {
             let mut sorted = table.to_vec();
             sorted.sort_unstable();
             sorted.dedup();
@@ -149,9 +155,30 @@ mod tests {
             action_classified_for_elevated_window("brand_new_action"),
             None
         );
-        // ...and every SSH/SFTP surface is classified denied.
+        // Saved-session mutations remain denied.
         for id in DENIED_WHEN_ELEVATED {
             assert_eq!(action_classified_for_elevated_window(id), Some(false));
+        }
+    }
+
+    #[test]
+    fn explicit_network_access_requires_a_known_token_not_an_ordinary_one() {
+        use oneterm_core::elevation::Elevation;
+
+        for id in NETWORK_ACTIONS {
+            assert_eq!(action_classified_for_elevated_window(id), Some(true));
+            assert!(action_allowed_for_elevation(id, Elevation::Elevated));
+            assert!(!action_allowed_for_elevation(
+                id,
+                Elevation::Unknown("test")
+            ));
+        }
+        for id in DENIED_WHEN_ELEVATED {
+            assert!(action_allowed_for_elevation(id, Elevation::Elevated));
+            assert!(!action_allowed_for_elevation(
+                id,
+                Elevation::Unknown("test")
+            ));
         }
     }
 
@@ -198,5 +225,28 @@ mod tests {
         // The process global is `NotElevated` here, so the table is not consulted.
         assert!(action_allowed_when_elevated("new_ssh_session"));
         assert!(action_allowed_when_elevated("brand_new_action"));
+    }
+
+    #[test]
+    fn confirmed_administrators_have_ordinary_action_permissions() {
+        use oneterm_core::elevation::Elevation;
+        for id in DENIED_WHEN_ELEVATED
+            .iter()
+            .chain(NETWORK_ACTIONS)
+            .chain(ALLOWED_WHEN_ELEVATED)
+            .copied()
+            .chain(["unclassified_future_action"])
+        {
+            assert_eq!(
+                action_allowed_for_elevation(id, Elevation::Elevated),
+                action_allowed_for_elevation(id, Elevation::NotElevated),
+                "{id}"
+            );
+            assert!(action_allowed_for_elevation(id, Elevation::Elevated));
+        }
+        assert!(!action_allowed_for_elevation(
+            "unclassified_future_action",
+            Elevation::Unknown("test")
+        ));
     }
 }

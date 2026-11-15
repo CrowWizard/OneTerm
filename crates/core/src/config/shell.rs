@@ -107,6 +107,13 @@ pub fn home_dir() -> Option<PathBuf> {
 /// `docks.json`) use `config_dir().join("<file>.json")` instead of hardcoding
 /// the path, centralizing path logic in one place.
 pub fn config_dir() -> PathBuf {
+    #[cfg(feature = "isolated-config")]
+    return super::isolated::config_dir();
+    #[cfg(not(feature = "isolated-config"))]
+    default_config_dir()
+}
+
+pub(super) fn default_config_dir() -> PathBuf {
     #[cfg(debug_assertions)]
     {
         PathBuf::from("target")
@@ -369,10 +376,8 @@ fn shell_not_found(shell: &str) -> AppError {
 ///
 /// Returns an error if `Custom` has no `program`, or the default shell cannot be found.
 pub fn resolve_shell(cfg: &LocalShellConfig) -> Result<ResolvedShell, AppError> {
-    // M3 (`DEC-0019` rule 4, `IN-0043`): an elevated process never lets
-    // `terminal.json` name the program it executes or add arguments to it. One
-    // guard here covers every local spawn in that process, because every one of
-    // them resolves through this function.
+    // Unknown tokens retain trusted-shell resolution. Confirmed administrators
+    // use configured programs/arguments like ordinary windows (US-0259).
     let trusted;
     let cfg = if super::elevation::is_restricted() {
         trusted =
@@ -550,30 +555,6 @@ pub fn resolve_shell(cfg: &LocalShellConfig) -> Result<ResolvedShell, AppError> 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Removes the fixture script on drop, including when an assertion
-    /// panics (`Drop` runs during unwind): a manual `std::fs::remove_file`
-    /// gated behind a successful write never runs if the write itself panics
-    /// (`BUG-0083`, same latent-leak shape `crash_report.rs`'s
-    /// `TemporaryDirectory` fixed for `BUG-0082`).
-    #[cfg(windows)]
-    struct TemporaryFile(PathBuf);
-
-    #[cfg(windows)]
-    impl Drop for TemporaryFile {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-
-    #[cfg(windows)]
-    impl std::ops::Deref for TemporaryFile {
-        type Target = Path;
-
-        fn deref(&self) -> &Path {
-            &self.0
-        }
-    }
 
     /// The shell literal whose *value* bash's `PS1` must end up carrying
     /// (`US-0136` MAJ-1, then NEW-MIN-1). The expectation, written out here:
@@ -845,26 +826,38 @@ mod tests {
     /// `None` = that host is not on this machine.
     #[cfg(windows)]
     fn enter_guard_verdict(exe: &str, label: &str, binding: &str) -> Option<String> {
-        use std::io::Write;
-
-        let script =
-            TemporaryFile(std::env::temp_dir().join(format!("oneterm-us0136-{label}.ps1")));
         let body = format!(
-            "Import-Module PSReadLine -ErrorAction SilentlyContinue\n\
-             {binding}\n\
-             {POWERSHELL_OSC133_PROMPT_INIT}\n\
+            "Import-Module PSReadLine -ErrorAction Stop;\
+             {binding};\
+             {POWERSHELL_OSC133_PROMPT_INIT};\
              if ($global:__OneTermEnter) {{ 'INSTALLED:' + $global:__OneTermEnter }} \
              else {{ 'DECLINED' }}\n"
         );
-        std::fs::File::create(&*script)
-            .and_then(|mut file| file.write_all(body.as_bytes()))
-            .expect("write the probe script");
+        // Match production startup; -File additionally depends on script-file policy.
         let output = std::process::Command::new(exe)
-            .args(["-NoLogo", "-NoProfile", "-File"])
-            .arg(&*script)
+            // A pwsh parent can export its own module path to Windows PowerShell.
+            // Let each tested host discover its own installed PSReadLine instead.
+            .env_remove("PSModulePath")
+            .args(["-NoLogo", "-NoProfile", "-Command"])
+            .arg(body)
             .output();
-        let output = output.ok()?;
+        let output = match output {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(error) => panic!("{exe} with {label}: could not launch probe: {error}"),
+        };
         let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "{exe} with {label}: status {}; stdout: {stdout}; stderr: {stderr}",
+            output.status
+        );
+        assert!(
+            stderr.trim().is_empty(),
+            "{exe} with {label}: status {}; stdout: {stdout}; stderr: {stderr}",
+            output.status
+        );
         Some(
             stdout
                 .lines()
@@ -1001,6 +994,20 @@ mod tests {
             ..Default::default()
         };
         assert!(resolve_shell(&cfg).is_err());
+    }
+
+    #[test]
+    fn pwsh_explicit_executable_preserves_integration_arguments() {
+        let program = PathBuf::from(r"D:\Program Files\PowerShell\7\pwsh.exe");
+        let cfg = LocalShellConfig {
+            kind: ShellKind::Pwsh,
+            program: Some(program.clone()),
+            ..Default::default()
+        };
+        let resolved = resolve_shell(&cfg).unwrap();
+        assert_eq!(resolved.program, program);
+        assert_eq!(&resolved.args[..3], ["-NoLogo", "-NoExit", "-Command"]);
+        assert_eq!(resolved.args[3], powershell_init(cfg.utf8));
     }
 
     #[test]

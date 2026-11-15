@@ -545,6 +545,7 @@ impl TerminalView {
     }
 
     /// The channel this Space is in, if any.
+    #[cfg(test)]
     pub(crate) fn channel(&self, cx: &Context<Self>) -> Option<InputChannel> {
         let registry = self.deps.input_channels.as_ref()?;
         registry.read(cx).channel_of(cx.entity_id())

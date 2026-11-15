@@ -19,6 +19,35 @@ Work packets `US-0130`, `US-0131` and `US-0132` implement it, in that order.
 
 ## Context
 
+### Amendment accepted 2026-11-15: full administrator parity
+
+After explicit credential/persistence/execution/update risk disclosure, the owner
+approved full ordinary-window application functionality (US-0259). This supersedes
+M1-M4/M7 feature denials and the earlier create-only exception for confirmed
+administrators. Unknown token remains fail-closed. Retain truthful token identity,
+administrator marking, UAC launch, separate elevated crash store, encryption,
+host trust and ordinary domain safeguards. No Windows boundary is bypassed.
+Current contract: IN-0057 low-level-design/administrator-functional-parity.md.
+The historical restrictions below are superseded for confirmed administrators.
+
+### Amendment accepted 2026-11-10: explicit SSH/SFTP access
+
+The owner selected administrator SSH/SFTP access while retaining the other
+restrictions (`IN-0057`, `US-0206`). This amendment supersedes M1's local-only
+rule and local-only descriptions in the original rationale below. Confirmed
+administrator windows may open Quick Connect, existing saved SSH sessions, the
+SSH Client dock, and SFTP file operations. Saved-session management remains
+read-only: no creation, property edits, duplication, group changes, deletion, or
+startup-preference changes. A failed token query still hides network surfaces.
+
+M2-M7 remain in force. Restricted processes still use a fixed startup layout,
+do not read docks.json, write no configuration, use trusted local-shell commands,
+and never auto-connect the startup SSH preference. SFTP's external-editor launch
+is refused, including OS file associations, so opening the dock does not make
+user-writable editor commands an administrator execution path. Explicit SFTP
+uploads/downloads can affect local files under the administrator token; that is
+part of the requested file-transfer capability, not permission to write config.
+
 The owner asked (2026-09-21) that the "+" (New Terminal) menu be able to run the Windows
 shells as administrator.
 
@@ -83,13 +112,10 @@ The seven mitigations the owner accepted with option A. They are not advice: eac
 constraint future work inherits, and each is a seam the detail design names with a file and
 line.
 
-- **M1 — the elevated instance is local shells only.** No SSH Sessions panel, no SFTP, no
-  Quick Connect and no New Saved Session rows, no Agent panel. The right dock is `None` and
-  its title-bar mode toggles are absent, not disabled. The "+" menu lists only the Windows
-  shells, and **no "Run as administrator" rows again**: an elevated window cannot spawn a
-  second identical one. The elevated window answers the request that was made and offers no
-  surface that nothing about elevation requires — the smaller the elevated application, the
-  smaller the tradeoff below.
+- **M1 — explicit SSH/SFTP access, read-only saved-session management** (amended
+  2026-11-10 above). The right dock offers SSH sessions and SFTP. The "+" menu lists
+  local shells, saved sessions and Quick Connect, but no New Saved Session or
+  redundant Run as administrator submenu. Unknown token status remains local-only.
 - **M2 — the elevated instance never checks, downloads or installs updates.** Its
   About/Updates surface says so in one line and offers no control. An elevated updater can
   write `C:\Program Files` and can leave files whose owner or ACL the ordinary instance
@@ -154,6 +180,16 @@ relative to the working directory (`crates/core/src/config/shell.rs:109-124`) an
 `runas` verb does not inherit the caller's.
 
 ## Alternatives
+
+### 2026-11-15 create-only Session amendment
+
+The owner permits confirmed administrator windows to create and save new SSH
+Sessions (US-0258). This narrowly amends M1/M4: use a locked background append to
+the current Session document, never the ordinary snapshot writer. Preserve existing
+records, sealed values, startup preference and unknown JSON fields. Unknown token
+status remains fail-closed. Existing-session edit/delete/duplication, group changes,
+startup selection, vault writes and all other restrictions remain. See IN-0057
+low-level-design/administrator-session-create.md.
 
 - [x] **A — a new elevated OneTerm window (selected above).** Answers the request with a
       real OneTerm tab: theme, font, keybindings, search, scrollback, shell integration,

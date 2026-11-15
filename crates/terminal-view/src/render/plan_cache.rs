@@ -2,13 +2,15 @@
 //!
 //! `US-0085` replaced the old three-phase selection — damage ∪ cursor row ∪
 //! never-built rows, then a per-row content hash to verify the candidates —
-//! with one comparison. A `RowKey` is `(RowId, SeqNo)`: the engine stamps a row
+//! with one comparison. Shipping `RowKey`s use `(RowId, SeqNo)`: the engine stamps a row
 //! only when it actually changes, and copies it into this view's snapshot state
 //! only when that stamp passed this view's watermark, so
 //! `stored_key != frame.row_key(r)` **is** the answer. The hash was there
 //! because the old damage escalated to `Full` on every scroll; the render
 //! state reports a scroll as a delta instead, so the plans shift with their rows
 //! and only the rows that really changed are rebuilt.
+//! Native staging keys instead compare immutable projected values exactly;
+//! the cache only needs equality and never interprets a native history position.
 //!
 //! An `Unchanged` frame returns before any of that: no key scan, no URL scan, no
 //! layout.

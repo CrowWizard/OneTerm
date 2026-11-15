@@ -133,6 +133,7 @@ impl Fixture {
         let (open_tx, mut open_rx) = mpsc::channel(HANDLE_REQUEST_CAPACITY);
         let (event_tx, events) = async_channel::bounded(16);
         let ctx = ForwardContext {
+            tasks: tokio_util::task::TaskTracker::new(),
             open_tx,
             shutdown: shutdown.clone(),
             notify: event_tx,

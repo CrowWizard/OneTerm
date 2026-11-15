@@ -24,7 +24,7 @@ pub(crate) fn page(cx: &App) -> SettingPage {
         .icon(Icon::new(IconName::Settings2))
         .group(super::appearance::theme_group(cx))
         .group(interface_group())
-        .group(super::terminal::shell_group())
+        .group(super::terminal::shell_group(cx))
 }
 
 /// "Interface" group — the UI (non-terminal) font size, the FPS HUD switch and the

@@ -15,8 +15,16 @@ mod assets;
 mod crash_report;
 mod crash_report_dialog;
 mod elevation;
+#[cfg(all(test, windows))]
+mod gpui_close_tests;
 mod init;
 mod native_crash;
+#[cfg(all(test, feature = "native-desktop"))]
+mod native_desktop;
+#[cfg(feature = "native-desktop")]
+mod native_workspace;
+#[cfg(feature = "native-desktop")]
+pub use native_workspace::run as run_native_desktop;
 mod oom;
 mod session_factory;
 mod ssh_client_panel;
@@ -65,7 +73,7 @@ fn read_process_identity() {
     let Some(shell) = requested else {
         return;
     };
-    if elevated.is_restricted() {
+    if !matches!(elevated, elevation::Elevation::NotElevated) {
         // Resolved here, in the elevated process, and never by the launching
         // one: a pre-flight check the elevated side then trusts is the hole with
         // extra steps (`DEC-0019` rule 4).
@@ -97,7 +105,10 @@ pub fn run() {
     // For one debug assertion: the `runas` launch must never run on this thread
     // (`IN-0043`, `crate::elevation::ElevationRequest::execute`).
     crate::elevation::remember_ui_thread();
-    if oneterm_core::elevation::is_restricted() {
+    if !matches!(
+        oneterm_core::elevation::elevation(),
+        oneterm_core::elevation::Elevation::NotElevated
+    ) {
         // Before the logger exists, so nothing is written to a console that is
         // about to go away. A debug build is console-subsystem and `runas` hands
         // it a console of its own, which would otherwise sit beside the elevated
@@ -135,7 +146,10 @@ pub fn run() {
     }
     // The command line was read before the logger existed; report it now.
     if let Some(kind) = oneterm_core::elevation::initial_shell() {
-        if oneterm_core::elevation::is_restricted() {
+        if !matches!(
+            oneterm_core::elevation::elevation(),
+            oneterm_core::elevation::Elevation::NotElevated
+        ) {
             log::info!(
                 "Elevated window: opening {} as its one shell",
                 kind.display_name()

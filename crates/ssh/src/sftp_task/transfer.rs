@@ -20,6 +20,58 @@ pub(super) const MAX_TRAVERSAL_ENTRIES: usize = 100_000;
 pub(super) use download::sftp_download;
 pub(super) use upload::sftp_upload;
 
+tokio::task_local! {
+    static NATIVE_TRANSPORT_STOP: tokio_util::sync::CancellationToken;
+}
+
+pub(super) async fn native_sftp_download(
+    sftp: &SftpChannel,
+    remote: &oneterm_core::RemotePath,
+    local: &Path,
+    progress: &Sender<TransferEvent>,
+    cancel: &tokio_util::sync::CancellationToken,
+    transport_stop: &tokio_util::sync::CancellationToken,
+) -> oneterm_core::Result<()> {
+    NATIVE_TRANSPORT_STOP
+        .scope(
+            transport_stop.clone(),
+            sftp_download(sftp, remote, local, progress, cancel),
+        )
+        .await
+}
+
+pub(super) async fn native_sftp_upload(
+    sftp: &SftpChannel,
+    local: &Path,
+    remote: &oneterm_core::RemotePath,
+    progress: &Sender<TransferEvent>,
+    cancel: &tokio_util::sync::CancellationToken,
+    transport_stop: &tokio_util::sync::CancellationToken,
+) -> oneterm_core::Result<()> {
+    NATIVE_TRANSPORT_STOP
+        .scope(
+            transport_stop.clone(),
+            sftp_upload(sftp, local, remote, progress, cancel),
+        )
+        .await
+}
+
+/// A disconnected native transport cannot acknowledge close/remove requests.
+/// Keep legacy cleanup unchanged, but never wait on an already-dead session.
+async fn remote_step<T>(
+    future: impl std::future::Future<Output = oneterm_core::Result<T>>,
+) -> oneterm_core::Result<T> {
+    if let Ok(stop) = NATIVE_TRANSPORT_STOP.try_with(Clone::clone) {
+        tokio::select! {
+            biased;
+            _ = stop.cancelled() => Err(AppError::Cancelled),
+            result = future => result,
+        }
+    } else {
+        future.await
+    }
+}
+
 /// Emit `TransferEvent::Cancelled` when `error` is a cancellation, so the UI
 /// learns about it even before the result channel settles; other errors pass
 /// through untouched.

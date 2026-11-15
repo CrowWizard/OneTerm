@@ -6,6 +6,11 @@ OneTerm can record printable output from local-shell and SSH terminals. Logging 
 
 ## Configuration and precedence
 
+US-0259 (2026-11-15): confirmed administrators support automatic/manual logging
+like ordinary windows, including the configured destination/write mode. Unknown
+token status remains denied. Owner accepted administrator-path write risks; the
+printable-only parser and normal logging validation are unchanged.
+
 `terminal.json` owns the global `logging` group:
 
 - `local`: automatically start logging new local shells;

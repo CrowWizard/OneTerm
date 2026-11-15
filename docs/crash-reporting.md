@@ -47,7 +47,7 @@ Native callback behavior is verified through `crash-handler`'s platform simulati
 
 ## Recovery lifecycle
 
-**An elevated window shows no recovery dialog at all** (`IN-0043`, `DEC-0019` M7): it still loads, promotes and prunes the reports in its own store, but it never opens the dialog below — an elevated window must not be a route to a browser and a prefilled GitHub issue. Its reports are reviewed from the normal window's store owner, or read from `crashes/elevated/` by hand.
+**Confirmed administrator windows show ordinary recovery UI** (US-0259, DEC-0019 amendment 2026-11-15), including the explicit GitHub-draft action. Reports still load, promote and prune in their separate `crashes/elevated/` store. Unknown token status suppresses startup recovery UI. The isolated native acceptance entry retains its own production-startup-effect suppression.
 
 After the main window opens, OneTerm shows completed reports sequentially, newest first (`crates/app/src/crash_report_dialog.rs`, next to the crash store in the composition root):
 

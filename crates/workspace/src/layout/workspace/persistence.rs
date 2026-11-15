@@ -96,10 +96,8 @@ pub(crate) fn save_state(state: &DockAreaState, trigger: &str) -> Result<()> {
 
 /// [`save_state`] against an explicit document path (tests use an isolated file).
 pub(crate) fn save_state_to(path: &Path, state: &DockAreaState, trigger: &str) -> Result<()> {
-    // M4 (`DEC-0019`): an elevated window writes no configuration, so the one
-    // writer of `docks.json` stays the unelevated instance and an elevated
-    // session leaves the user's layout — under over-the-shoulder elevation, the
-    // administrator's profile — exactly as it found them.
+    // US-0259: only Unknown tokens are refused; confirmed administrators use
+    // the ordinary document owner and persistence workflow.
     //
     // The guard sits in this function rather than in `save_state_logged` for two
     // reasons: it is the deepest point every dock write passes through, so a
@@ -107,7 +105,7 @@ pub(crate) fn save_state_to(path: &Path, state: &DockAreaState, trigger: &str) -
     // path, so the rule has a test that is not aimed at the developer's real
     // configuration directory (`IN-0043` MIN-5).
     if oneterm_core::elevation::is_restricted() {
-        log::debug!("elevated window: not writing the dock layout [trigger={trigger}]");
+        log::debug!("unknown process token: not writing the dock layout [trigger={trigger}]");
         return Ok(());
     }
     let state = persistence_compatible_state(state);
@@ -180,7 +178,9 @@ mod tests {
 
     impl RestrictedElevation {
         fn new() -> Self {
-            oneterm_core::elevation::set_elevation(oneterm_core::elevation::Elevation::Elevated);
+            oneterm_core::elevation::set_elevation(oneterm_core::elevation::Elevation::Unknown(
+                "test token query failure",
+            ));
             Self
         }
     }
@@ -248,10 +248,13 @@ mod tests {
 
         let _restricted = RestrictedElevation::new();
         super::save_state_to(&path, &state, "test").expect("a refusal is not an error");
-        assert!(
-            !path.exists(),
-            "an elevated window must write no dock layout"
-        );
+        assert!(!path.exists(), "an unknown token must write no dock layout");
+        oneterm_core::elevation::set_elevation(oneterm_core::elevation::Elevation::Elevated);
+        super::save_state_to(&path, &state, "administrator-parity")
+            .expect("confirmed administrators persist ordinary layouts");
+        let document: DockDocument =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(document.dock_state::<DockAreaState>().unwrap(), state);
     }
 
     #[test]

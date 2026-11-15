@@ -11,6 +11,7 @@
 //! Membership is in-memory only; nothing about channels reaches `docks.json`.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use gpui::{App, AppContext, Context, Entity, EntityId, Global};
 
@@ -21,8 +22,18 @@ use oneterm_terminal::{TerminalSession, report_generated_input};
 /// join sequence that orders the fan-out.
 struct Member {
     channel: InputChannel,
-    session: Entity<Box<dyn TerminalSession>>,
+    session: ChannelTarget,
     joined: u64,
+}
+
+/// An engine-neutral peer receiver. Native clients capture only weak UI owners.
+pub type ChannelReceiver = Rc<dyn Fn(BroadcastInput<'_>, &mut App)>;
+
+/// Peer delivery never calls an origin handler or recursively broadcasts.
+#[derive(Clone)]
+pub enum ChannelTarget {
+    Session(Entity<Box<dyn TerminalSession>>),
+    Receiver(ChannelReceiver),
 }
 
 /// One broadcastable input, mirroring the four `TerminalSession` write methods
@@ -81,6 +92,27 @@ impl InputChannelRegistry {
         session: Entity<Box<dyn TerminalSession>>,
         cx: &mut Context<Self>,
     ) {
+        self.join_target(id, channel, ChannelTarget::Session(session), cx);
+    }
+
+    /// Register an engine-neutral receiver without retaining its native owner.
+    pub fn join_receiver(
+        &mut self,
+        id: EntityId,
+        channel: InputChannel,
+        receiver: ChannelReceiver,
+        cx: &mut Context<Self>,
+    ) {
+        self.join_target(id, channel, ChannelTarget::Receiver(receiver), cx);
+    }
+
+    fn join_target(
+        &mut self,
+        id: EntityId,
+        channel: InputChannel,
+        session: ChannelTarget,
+        cx: &mut Context<Self>,
+    ) {
         let joined = match self.members.get(&id) {
             Some(member) if member.channel == channel => member.joined,
             _ => {
@@ -124,11 +156,15 @@ impl InputChannelRegistry {
         self.members.get(&id).map(|member| member.channel)
     }
 
+    /// Changes when an origin leaves and rejoins, even on the same channel.
+    pub fn membership_token(&self, id: EntityId) -> Option<(InputChannel, u64)> {
+        self.members
+            .get(&id)
+            .map(|member| (member.channel, member.joined))
+    }
+
     /// The members of `channel`, in join order.
-    pub fn members(
-        &self,
-        channel: InputChannel,
-    ) -> Vec<(EntityId, Entity<Box<dyn TerminalSession>>)> {
+    pub fn members(&self, channel: InputChannel) -> Vec<(EntityId, ChannelTarget)> {
         let mut members: Vec<_> = self
             .members
             .iter()
@@ -170,19 +206,22 @@ impl InputChannelRegistry {
             .map(|(_, session)| session)
             .collect();
         for peer in peers {
-            peer.update(cx, |session, _| {
-                session.scroll_to_bottom();
-                match input {
-                    BroadcastInput::Bytes(bytes) => {
-                        report_generated_input("input channel key", session.write(bytes));
+            match peer {
+                ChannelTarget::Receiver(receiver) => receiver(input, cx),
+                ChannelTarget::Session(peer) => peer.update(cx, |session, _| {
+                    session.scroll_to_bottom();
+                    match input {
+                        BroadcastInput::Bytes(bytes) => {
+                            report_generated_input("input channel key", session.write(bytes));
+                        }
+                        BroadcastInput::Text(text) => session.commit_text(text),
+                        BroadcastInput::Paste(text) => {
+                            report_best_effort("input channel paste", session.paste(text));
+                        }
+                        BroadcastInput::Interrupt => session.send_ctrl_c(),
                     }
-                    BroadcastInput::Text(text) => session.commit_text(text),
-                    BroadcastInput::Paste(text) => {
-                        report_best_effort("input channel paste", session.paste(text));
-                    }
-                    BroadcastInput::Interrupt => session.send_ctrl_c(),
-                }
-            });
+                }),
+            }
         }
     }
 }
@@ -191,6 +230,7 @@ impl InputChannelRegistry {
 mod tests {
     use gpui::TestAppContext;
     use oneterm_terminal::test_support::{FakeSessionProbe, FakeTerminalSession};
+    use std::cell::RefCell;
 
     use super::*;
 
@@ -206,6 +246,67 @@ mod tests {
 
     fn registry(cx: &mut TestAppContext) -> Entity<InputChannelRegistry> {
         cx.update(|cx| cx.new(|_| InputChannelRegistry::default()))
+    }
+
+    #[gpui::test]
+    fn callback_peers_share_join_order_and_all_four_input_forms(cx: &mut TestAppContext) {
+        let registry = registry(cx);
+        let (origin, session, origin_probe) = session(cx);
+        let (first, _, _) = self::session(cx);
+        let (second, _, _) = self::session(cx);
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        registry.update(cx, |registry, cx| {
+            registry.join(origin, InputChannel::A, session, cx);
+            for id in [first, second] {
+                let calls = calls.clone();
+                registry.join_receiver(
+                    id,
+                    InputChannel::A,
+                    Rc::new(move |input, _| {
+                        let bytes = match input {
+                            BroadcastInput::Bytes(bytes) => bytes.to_vec(),
+                            BroadcastInput::Text(text) | BroadcastInput::Paste(text) => {
+                                text.as_bytes().to_vec()
+                            }
+                            BroadcastInput::Interrupt => vec![3],
+                        };
+                        calls.borrow_mut().push((id, bytes));
+                    }),
+                    cx,
+                );
+            }
+            for input in [
+                BroadcastInput::Bytes(b"key"),
+                BroadcastInput::Text("text"),
+                BroadcastInput::Paste("paste"),
+                BroadcastInput::Interrupt,
+            ] {
+                registry.fan_out(origin, input, cx);
+            }
+            assert_eq!(
+                registry
+                    .members(InputChannel::A)
+                    .iter()
+                    .map(|(id, _)| *id)
+                    .collect::<Vec<_>>(),
+                [origin, first, second]
+            );
+            registry.close(InputChannel::A, cx);
+            registry.fan_out(origin, BroadcastInput::Bytes(b"late"), cx);
+        });
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 8);
+        for (pair, expected) in
+            calls
+                .chunks_exact(2)
+                .zip([b"key".as_slice(), b"text", b"paste", b"\x03"])
+        {
+            assert_eq!(
+                pair,
+                [(first, expected.to_vec()), (second, expected.to_vec())]
+            );
+        }
+        assert!(origin_probe.writes().is_empty());
     }
 
     #[gpui::test]

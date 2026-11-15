@@ -6,89 +6,29 @@ use oneterm_terminal::{TerminalPalette, resolve_color};
 
 use crate::render::frame::{Color as FrameColor, Fnv1a};
 
-/// Fixed ANSI 16-color palette (the Tango color scheme).
-pub(crate) const ANSI_16: [Rgb; 16] = [
-    Rgb {
-        r: 0x00,
-        g: 0x00,
-        b: 0x00,
-    }, // 0 black
-    Rgb {
-        r: 0xcc,
-        g: 0x00,
-        b: 0x00,
-    }, // 1 red
-    Rgb {
-        r: 0x4e,
-        g: 0x9a,
-        b: 0x06,
-    }, // 2 green
-    Rgb {
-        r: 0xc4,
-        g: 0xa0,
-        b: 0x00,
-    }, // 3 yellow
-    Rgb {
-        r: 0x34,
-        g: 0x65,
-        b: 0xa4,
-    }, // 4 blue
-    Rgb {
-        r: 0x75,
-        g: 0x50,
-        b: 0x7b,
-    }, // 5 magenta
-    Rgb {
-        r: 0x06,
-        g: 0x98,
-        b: 0x9a,
-    }, // 6 cyan
-    Rgb {
-        r: 0xd3,
-        g: 0xd7,
-        b: 0xcf,
-    }, // 7 white
-    Rgb {
-        r: 0x55,
-        g: 0x57,
-        b: 0x53,
-    }, // 8 bright black
-    Rgb {
-        r: 0xef,
-        g: 0x29,
-        b: 0x29,
-    }, // 9 bright red
-    Rgb {
-        r: 0x8a,
-        g: 0xe2,
-        b: 0x34,
-    }, // 10 bright green
-    Rgb {
-        r: 0xfc,
-        g: 0xe9,
-        b: 0x4f,
-    }, // 11 bright yellow
-    Rgb {
-        r: 0x72,
-        g: 0x9f,
-        b: 0xcf,
-    }, // 12 bright blue
-    Rgb {
-        r: 0xad,
-        g: 0x7f,
-        b: 0xa8,
-    }, // 13 bright magenta
-    Rgb {
-        r: 0x34,
-        g: 0xe2,
-        b: 0xe2,
-    }, // 14 bright cyan
-    Rgb {
-        r: 0xee,
-        g: 0xee,
-        b: 0xec,
-    }, // 15 bright white
-];
+/// Derive ANSI ink from the active theme, not UI surface `*_light` tokens.
+pub(crate) fn ansi_from_theme(theme: &gpui_component::Theme) -> [Rgb; 16] {
+    let c = &theme.colors;
+    let normal = [
+        c.background,
+        c.red,
+        c.green,
+        c.yellow,
+        c.blue,
+        c.magenta,
+        c.cyan,
+        c.foreground,
+    ];
+    std::array::from_fn(|index| {
+        let mut color = c.background.blend(normal[index % 8]);
+        if index == 8 {
+            color = c.background.blend(c.muted_foreground);
+        } else if index > 8 {
+            color.l += (1.0 - color.l) * 0.2;
+        }
+        rgb_from_rgba(color.to_rgb())
+    })
+}
 
 /// The engine's `Rgb` (u8) → `gpui::Rgba` (0..1, alpha 1).
 pub(crate) fn rgba_from_rgb(c: Rgb) -> Rgba {
@@ -182,6 +122,10 @@ impl ColorTable {
             FrameColor::BrightForeground => Self::BRIGHT_FOREGROUND,
             FrameColor::DimForeground => Self::DIM_FOREGROUND,
             FrameColor::Rgb(r, g, b) => {
+                return Hsla::from(rgba_from_rgb(Rgb { r, g, b }));
+            }
+            #[cfg(feature = "ghostty-native")]
+            FrameColor::ThemeRgb(r, g, b) | FrameColor::DefaultRgb(r, g, b) => {
                 return Hsla::from(rgba_from_rgb(Rgb { r, g, b }));
             }
         };

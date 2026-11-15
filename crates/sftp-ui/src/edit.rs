@@ -206,6 +206,17 @@ impl SftpPanel {
     /// managed temp copy, launches the editor, and registers a watcher that
     /// uploads saves back.
     pub(crate) fn do_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if oneterm_core::elevation::is_restricted() {
+            window.push_notification(
+                notify(
+                    NotificationType::Warning,
+                    "Open remote files in an editor from the normal OneTerm window.",
+                    cx,
+                ),
+                cx,
+            );
+            return;
+        }
         let entry = match self.selected_entry(cx) {
             Some(entry) if !entry.is_dir => entry,
             Some(entry) => {

@@ -324,12 +324,15 @@ pub fn init(cx: &mut App) {
     // `config.radius = None`):
     //
     // - radius = 4px, radius_lg = 6px: softly rounded controls.
+    // - focus_ring = false: tint the existing edge instead of adding an outer
+    //   band; borderless controls still draw the kit's single focus cue.
     // - scrollbar_show = Always: scrollbars stay visible instead of the
     //   gpui-component default (`sync_scrollbar_appearance` may set Hover).
     {
         let theme = Theme::global_mut(cx);
         theme.radius = px(4.);
         theme.radius_lg = px(6.);
+        theme.focus_ring = false;
         theme.scrollbar_mode = ScrollbarMode::Always;
     }
 
@@ -348,6 +351,10 @@ pub fn init(cx: &mut App) {
     // `oneterm_settings::UiConfig::observe_theme`, which the composition root
     // registers after this init so the startup mutations above do not write.
 }
+
+#[cfg(test)]
+#[path = "focus_tests.rs"]
+mod focus_tests;
 
 #[cfg(test)]
 mod tests {

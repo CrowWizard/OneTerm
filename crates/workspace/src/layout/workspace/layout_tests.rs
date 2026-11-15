@@ -667,7 +667,9 @@ struct RestrictedElevation;
 
 impl RestrictedElevation {
     fn new() -> Self {
-        oneterm_core::elevation::set_elevation(oneterm_core::elevation::Elevation::Elevated);
+        oneterm_core::elevation::set_elevation(oneterm_core::elevation::Elevation::Unknown(
+            "test token query failure",
+        ));
         Self
     }
 }
@@ -678,7 +680,7 @@ impl Drop for RestrictedElevation {
     }
 }
 
-/// `MAJ-2`, the primary fix: an elevated window does not **read** `docks.json`.
+/// Unknown tokens never read layouts; confirmed administrators restore normally.
 ///
 /// Not "reads it and ignores the side docks" — `load_layout` builds them by
 /// name, so anything that reaches it has already lost. The injected reader
@@ -687,12 +689,12 @@ impl Drop for RestrictedElevation {
 #[ignore = "flips the process-global elevation switch; run with --test-threads=1"]
 fn an_elevated_window_never_reads_the_saved_layout() {
     let _restricted = RestrictedElevation::new();
-    let document = startup_dock_document(true, || {
-        panic!("an elevated window must not read docks.json at all")
+    let document = startup_dock_document(oneterm_core::elevation::is_restricted(), || {
+        panic!("an unknown token must not read docks.json at all")
     });
     assert!(
         document.is_none(),
-        "an elevated window starts from the fixed default layout"
+        "an unknown token starts from the fixed default layout"
     );
 
     // ...and an ordinary window still reads it, which is the regression clause.
@@ -703,17 +705,20 @@ fn an_elevated_window_never_reads_the_saved_layout() {
         read.is_some(),
         "an ordinary window must still load its layout"
     );
+    oneterm_core::elevation::set_elevation(oneterm_core::elevation::Elevation::Elevated);
+    let restored = startup_dock_document(oneterm_core::elevation::is_restricted(), || {
+        Some(oneterm_state::dock_persistence::DockDocument::default())
+    });
+    assert!(
+        restored.is_some(),
+        "confirmed administrators read saved layouts"
+    );
 }
 
-/// `MAJ-2`, the second lock: the elevated start-up path yields a dock state with
-/// **no right dock**, even when one is already there.
-///
-/// This is the test `US-0131`'s verification plan named and the branch did not
-/// have. The pre-existing dock stands in for what `load_layout` used to leave
-/// behind, so the assertion holds whichever way a dock arrives.
+/// Confirmed administrator windows now build the SSH Client right dock.
 #[test]
 #[ignore = "flips the process-global elevation switch; run with --test-threads=1"]
-fn the_elevated_startup_path_yields_a_dock_state_with_no_right_dock() {
+fn the_elevated_startup_path_yields_an_ssh_client_right_dock() {
     let mut app = gpui::TestAppContext::single();
     let (dock_area, cx) = dock_area(&mut app);
     set_right_dock(&dock_area, panel_names::SSH_CLIENT, px(333.), true, cx);
@@ -724,21 +729,22 @@ fn the_elevated_startup_path_yields_a_dock_state_with_no_right_dock() {
     );
 
     let _restricted = RestrictedElevation::new();
+    oneterm_core::elevation::set_elevation(oneterm_core::elevation::Elevation::Elevated);
     let state = cx
         .update(|window, cx| layout::apply_center_reset(dock_area.downgrade(), window, cx))
         .expect("dock area alive");
 
     assert!(
-        !dock_area.read_with(cx, |dock_area, _| dock_area.has_dock(DockPlacement::Right)),
-        "an elevated window must have no right dock"
+        dock_area.read_with(cx, |dock_area, _| dock_area.has_dock(DockPlacement::Right)),
+        "an administrator window offers the SSH Client dock"
     );
     assert!(
-        state.right_dock.is_none(),
-        "and the dumped dock state must not carry one either"
+        state.right_dock.is_some(),
+        "and the dumped state carries it without being persisted"
     );
     let dumped = serde_json::to_string(&state).expect("dock state serializes");
     assert!(
-        !dumped.contains(panel_names::SSH_CLIENT) && !dumped.contains(panel_names::SFTP),
-        "the elevated dock state must not name the SSH Client or SFTP panels: {dumped}"
+        dumped.contains(panel_names::SSH_CLIENT),
+        "the administrator dock state names the SSH Client: {dumped}"
     );
 }

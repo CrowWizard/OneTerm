@@ -15,6 +15,7 @@
 
 mod channel_menu;
 mod duplicate;
+mod pane;
 mod spaces;
 mod tab_title;
 mod terminal_panel;

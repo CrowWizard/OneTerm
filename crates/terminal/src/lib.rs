@@ -16,6 +16,27 @@ pub mod backend;
 pub(crate) mod color_classification;
 pub(crate) mod content;
 pub(crate) mod factory;
+#[cfg(feature = "ghostty-native")]
+#[doc(hidden)]
+pub mod ghostty;
+#[cfg(feature = "ghostty-native")]
+#[path = "ghostty/bridge.rs"]
+pub mod ghostty_bridge;
+#[cfg(feature = "ghostty-native")]
+#[path = "ghostty/content.rs"]
+pub mod ghostty_content;
+#[cfg(feature = "ghostty-native")]
+#[path = "ghostty/ime.rs"]
+pub mod ghostty_ime;
+#[cfg(feature = "ghostty-native")]
+#[path = "ghostty/shared_model.rs"]
+pub mod ghostty_model;
+#[cfg(feature = "ghostty-native")]
+#[path = "ghostty/project.rs"]
+pub mod ghostty_projection;
+#[cfg(feature = "ghostty-native")]
+#[path = "ghostty/session.rs"]
+pub mod ghostty_session;
 pub mod handle;
 pub mod logging;
 pub mod model;
@@ -24,6 +45,7 @@ pub(crate) mod osc_color;
 pub(crate) mod palette;
 pub(crate) mod paste;
 pub(crate) mod program_status;
+pub(crate) mod render_row;
 pub mod security_policy;
 pub mod session;
 #[cfg(test)]
@@ -38,7 +60,7 @@ pub use backend::{
 };
 pub use color_classification::is_decorative_character;
 pub use content::{ContentCell, LineRangeCells, TerminalContent, last_content_row};
-pub use factory::{PtySize, SessionFactory};
+pub use factory::{CreatedSession, PtySize, SessionFactory};
 pub use handle::{DEFAULT_SCROLLBACK_LINES, SharedTerminal, TerminalHandle, new_shared_terminal};
 pub use logging::{
     TerminalLogController, TerminalLogError, TerminalLogState, local_log_identity, ssh_log_identity,
@@ -67,6 +89,7 @@ pub use osc::encode_osc52;
 pub use osc_color::DynamicColors;
 pub use palette::{TerminalPalette, resolve_color};
 pub use program_status::ProgramState;
+pub use render_row::{RenderRow, RenderRowKey};
 pub use security_policy::{ClipboardOrigin, TerminalSecurityPolicy};
 pub use session::{
     NetStats, PtyOwner, PtySession, SessionEvent, SessionKind, TerminalCapabilities, TerminalError,

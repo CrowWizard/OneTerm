@@ -29,7 +29,7 @@ use crate::theme::TerminalTheme;
 /// What the view hands the element each frame.
 pub(crate) struct TerminalElementSpec {
     pub id: ElementId,
-    pub session: Entity<Box<dyn TerminalSession>>,
+    pub session: ElementSession,
     /// Inputs already refreshed by the view.
     pub state: Rc<RefCell<RenderState>>,
     /// Installs the IME handler (`window.handle_input`) in paint; the view
@@ -39,6 +39,25 @@ pub(crate) struct TerminalElementSpec {
 
 pub(crate) struct TerminalElement {
     spec: TerminalElementSpec,
+}
+
+pub(crate) enum ElementSession {
+    Legacy(Entity<Box<dyn TerminalSession>>),
+    #[cfg(feature = "ghostty-native")]
+    Native {
+        session: std::sync::Arc<dyn oneterm_terminal::ghostty_session::SurfaceSession>,
+        on_error: Rc<dyn Fn(oneterm_terminal::ghostty_session::InputError, &mut App)>,
+    },
+}
+
+impl ElementSession {
+    fn legacy(&self) -> Option<&Entity<Box<dyn TerminalSession>>> {
+        match self {
+            Self::Legacy(session) => Some(session),
+            #[cfg(feature = "ghostty-native")]
+            Self::Native { .. } => None,
+        }
+    }
 }
 
 impl TerminalElement {
@@ -115,9 +134,11 @@ impl Element for TerminalElement {
         // below so the first reply after spawn already has real pixels
         // (`BUG-0061`). Keyed on the metrics, not on the grid: a DPI-scale
         // change moves the device cell while rows and columns stand still.
-        if state.last_cell_pixels != Some(metrics.device) {
+        if let Some(session) = self.spec.session.legacy()
+            && state.last_cell_pixels != Some(metrics.device)
+        {
             let device = metrics.device;
-            self.spec.session.update(cx, |session, _| {
+            session.update(cx, |session, _| {
                 session.set_cell_pixels(
                     device.w.clamp(1, i32::from(u16::MAX)) as u16,
                     device.h.clamp(1, i32::from(u16::MAX)) as u16,
@@ -127,27 +148,70 @@ impl Element for TerminalElement {
         }
         let gutter_width = state.gutter_width(window);
         let geometry = GridGeometry::new(bounds, metrics, gutter_width, state.inputs.padding);
-        if state.last_grid != Some(geometry.size) {
-            let GridSize { rows, cols } = geometry.size;
-            self.spec.session.update(cx, |session, _| {
-                if let Err(error) = session.resize(rows, cols) {
-                    log::warn!("terminal resize to {rows}x{cols} failed: {error}");
+        let grid_changed = state.last_grid != Some(geometry.size);
+        match &self.spec.session {
+            ElementSession::Legacy(session) if grid_changed => {
+                let GridSize { rows, cols } = geometry.size;
+                session.update(cx, |session, _| {
+                    if let Err(error) = session.resize(rows, cols) {
+                        log::warn!("terminal resize to {rows}x{cols} failed: {error}");
+                    }
+                });
+                // Recorded even on failure so a broken session does not trigger a
+                // resize storm.
+                state.last_grid = Some(geometry.size);
+            }
+            #[cfg(feature = "ghostty-native")]
+            ElementSession::Native { session, on_error }
+                if grid_changed || state.last_cell_pixels != Some(metrics.device) =>
+            {
+                let device = metrics.device;
+                let result = session.resize(oneterm_terminal::ghostty_session::Size {
+                    cols: geometry.size.cols,
+                    rows: geometry.size.rows,
+                    cell_width_px: device.w.clamp(1, i32::from(u16::MAX)) as u16,
+                    cell_height_px: device.h.clamp(1, i32::from(u16::MAX)) as u16,
+                });
+                if let Err(error) = result {
+                    on_error(error, cx);
                 }
-            });
-            // Recorded even on failure so a broken session does not trigger a
-            // resize storm.
-            state.last_grid = Some(geometry.size);
+                state.last_grid = Some(geometry.size);
+                state.last_cell_pixels = Some(device);
+            }
+            _ => {}
         }
 
         // The frame's only `snapshot_into`: it consumes the engine's damage.
-        state.frame.snapshot(&**self.spec.session.read(cx));
+        match &self.spec.session {
+            ElementSession::Legacy(session) => state.frame.snapshot(&**session.read(cx)),
+            #[cfg(feature = "ghostty-native")]
+            ElementSession::Native { session, .. } => state.frame.snapshot_native(session.as_ref()),
+        }
         state.stats.snapshot_calls += 1;
         state.stats.images_uploaded = state.graphics.ingest(state.frame.graphics(), window);
         state.glyphs.begin_frame();
         state.update_plans(&metrics, window);
+        #[cfg(feature = "ghostty-native")]
+        if let ElementSession::Native { session, .. } = &self.spec.session {
+            state.inputs.search.clear();
+            if let Some((result, active)) = &state.inputs.native_search
+                && session.query().matches_search(result)
+                && let Some(viewport) = state.frame.native_viewport()
+                && viewport.matches_search(result)
+            {
+                super::overlay::native_search_highlights(
+                    &viewport,
+                    result,
+                    *active,
+                    &mut state.inputs.search,
+                );
+            }
+        }
         state.compute_overlays();
         let cursor = state.resolve_cursor(&geometry, window);
-        let rows = usize::from(geometry.size.rows);
+        // A native resize is acknowledged asynchronously; the last published
+        // viewport can be smaller than the current window (or absent at startup).
+        let rows = usize::from(geometry.size.rows.min(state.frame.size().rows));
         let display_offset = state.frame.display_offset();
         state.build_gutter_labels(rows, display_offset, window);
         state.geometry = Some(geometry);
@@ -241,6 +305,10 @@ impl Element for TerminalElement {
         if let Some(ime) = ime {
             ime(bounds, window, cx);
         }
+        #[cfg(feature = "ghostty-native")]
+        if let ElementSession::Native { session, .. } = &self.spec.session {
+            session.release_repaint_hint();
+        }
     }
 }
 
@@ -278,7 +346,11 @@ impl GridPainter<'_> {
     )]
     fn paint(&mut self, plans: &[RowPlan], rows: Range<usize>, window: &mut Window) {
         // Element background, then the gutter column.
-        self.quad(self.bounds, self.theme.bg, window);
+        let background = self
+            .frame
+            .background()
+            .map_or(self.theme.bg, |color| self.theme.color(color));
+        self.quad(self.bounds, background, window);
         let gutter_width = self.geometry.gutter_width;
         if gutter_width > px(0.0) {
             let b = self.bounds;
@@ -365,7 +437,11 @@ impl GridPainter<'_> {
         let m = self.geometry.metrics;
         for row in rows {
             let frame_row = self.frame.row(row);
-            let row_id = frame_row.id();
+            let Some(row_id) = frame_row.id() else {
+                // Native history/image anchors are not adapted yet. Native
+                // rows cannot fabricate the ordered id this placement needs.
+                continue;
+            };
             for (col, cell) in frame_row.cells().enumerate() {
                 let Some(id) = cell.graphic else {
                     continue;

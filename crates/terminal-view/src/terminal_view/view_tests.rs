@@ -753,7 +753,7 @@ fn report_event_types_produces_the_repeat_and_release_bytes(cx: &mut TestAppCont
     // silently assert the legacy bytes.
     let before = view.read_with(cx, |view, _| view.render_state.borrow().frame.modes());
     assert!(
-        before.keyboard_flags.is_empty(),
+        before.unwrap().keyboard_flags.is_empty(),
         "nothing is negotiated before the program pushes"
     );
     probe.feed(b"\x1b[>2u");
@@ -763,6 +763,7 @@ fn report_event_types_produces_the_repeat_and_release_bytes(cx: &mut TestAppCont
     let after = view.read_with(cx, |view, _| view.render_state.borrow().frame.modes());
     assert!(
         after
+            .unwrap()
             .keyboard_flags
             .contains(KeyboardFlags::REPORT_EVENT_TYPES),
         "the repaint must carry the pushed flags, or the assertions below prove nothing"

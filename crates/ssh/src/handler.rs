@@ -173,6 +173,7 @@ pub(crate) struct SshClientHandler {
     port: u16,
     policy: HostKeyPolicy,
     known_hosts_path: Option<PathBuf>,
+    forward_tasks: tokio_util::task::TaskTracker,
     /// Remote forwards this connection asked for, and the session token their
     /// relays die with; `None` for jump hops and connections without forwards.
     forwards: Option<(ForwardTable, CancellationToken)>,
@@ -192,6 +193,7 @@ impl SshClientHandler {
             port,
             policy,
             known_hosts_path: None,
+            forward_tasks: tokio_util::task::TaskTracker::new(),
             forwards: None,
             agent_bridge: None,
         }
@@ -215,6 +217,17 @@ impl SshClientHandler {
         self.port
     }
 
+    #[cfg(feature = "ghostty-native")]
+    pub(crate) fn known_hosts_path(&self) -> Option<PathBuf> {
+        self.known_hosts_path.clone()
+    }
+
+    #[cfg(feature = "ghostty-native")]
+    pub(crate) fn with_forward_tasks(mut self, tasks: tokio_util::task::TaskTracker) -> Self {
+        self.forward_tasks = tasks;
+        self
+    }
+
     /// Accept `forwarded-tcpip` channels for the remote forwards in `table`.
     pub(crate) fn with_forwards(
         mut self,
@@ -225,7 +238,7 @@ impl SshClientHandler {
         self
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "ghostty-native"))]
     pub(crate) fn with_known_hosts_path(mut self, path: PathBuf) -> Self {
         self.known_hosts_path = Some(path);
         self
@@ -435,7 +448,12 @@ impl client::Handler for SshClientHandler {
                 );
                 // Confirm before the bridge writes anything to the channel.
                 reply.accept().await;
-                spawn_forwarded_tcpip(channel, target, shutdown.clone());
+                spawn_forwarded_tcpip(
+                    channel,
+                    target,
+                    shutdown.clone(),
+                    self.forward_tasks.clone(),
+                );
             }
             _ => {
                 log::warn!(

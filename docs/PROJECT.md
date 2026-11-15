@@ -5,6 +5,12 @@ the code, manifests, tests, and accepted decisions belong here — not speculati
 
 ## Mode
 
+Administrator feature policy (US-0259, owner approved 2026-11-15): confirmed
+Elevated tokens have ordinary application permissions. Unknown token remains
+fail-closed; actual token identity, administrator marking, UAC launch and separate
+crash storage remain. Existing encryption/trust/integrity checks and native test
+entry isolation are unchanged. See IN-0057 administrator-functional-parity LLD.
+
 `brownfield`
 
 Existing code is authoritative where a contract has not yet been documented. Missing
@@ -34,6 +40,27 @@ product: terminal engine glue, backends, UI, persistence, packaging, and the aut
   inside `crates/ssh`.
 - Binary: `oneterm` from `crates/app` (keeps the console in debug builds); local
   diagnostics binaries live in `crates/tools`.
+- Migration staging (IN-0057 / US-0208, DEC-0023): the explicit default-off
+  `oneterm-terminal/ghostty-native` feature links a pinned project-local
+  libghostty-vt build for native-owner validation. Production sessions still
+  use `oneterm-vt`; native ABI proof is not an application cutover. US-0245 adds
+  a separate default-off `oneterm-app/native-desktop` local acceptance binary.
+  US-0249 now wires its real workspace using a native-only local factory and
+  isolated EXE-sibling `oneterm-native-data` storage, without automatic SSH or
+  update checks. US-0251 adds manual direct native SSH through existing auth/trust
+  dialogs, tagged duplicate placement and observed pending/unplaced cleanup.
+  Trust uses the isolated config root's known_hosts. US-0254 through US-0257
+  add policy-gated OSC 52, printable output logging, ordered jump routes and
+  Local/Remote/Dynamic forwarding. Agent forwarding still rejects before
+  networking. US-0252 adds optional same-connection
+  SFTP using the existing browser, active-Space backend and live cwd publication.
+  Native shutdown observes SFTP request/transfer and transport destruction;
+  disconnected upload staging cleanup failures remain visible. Native OSC 52
+  uses bounded native-parser boundaries, remote default-deny and originating
+  session replies. Native completion observes forwarding task destruction
+  before target and reverse-order carrier release.
+  External-server desktop and upstream shutdown-race acceptance remain open;
+  production startup and factory still select legacy sessions.
 - Persistence: JSON files in `oneterm_core::config_dir()` (`target/` in debug builds,
   `~/.OneTerm/` in release): `terminal.json`, `ui_config.json`, `docks.json`,
   `ssh_session.json`, `update_config.json`, `vault.json` (the master-password vault header,

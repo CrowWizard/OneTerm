@@ -27,6 +27,50 @@ pub(crate) struct SearchRect {
     pub active: bool,
 }
 
+#[cfg(feature = "ghostty-native")]
+pub(crate) fn native_search_highlights(
+    viewport: &oneterm_terminal::ghostty_content::Viewport,
+    result: &oneterm_terminal::ghostty::search::Snapshot,
+    active: Option<usize>,
+    out: &mut Vec<SearchHighlight>,
+) {
+    out.clear();
+    if !viewport.matches_search(result) {
+        return;
+    }
+    let top = viewport.metadata().scrollbar.offset;
+    let bottom = top.saturating_add(viewport.lines() as u64);
+    let cols = viewport.columns();
+    for (index, found) in result.matches.iter().enumerate() {
+        let start = u64::from(found.start.row).max(top);
+        let end = u64::from(found.end.row).saturating_add(1).min(bottom);
+        for row in start..end {
+            let start_col = if row == u64::from(found.start.row) {
+                found.start.column.min(cols)
+            } else {
+                0
+            };
+            let end_col = if row == u64::from(found.end.row) {
+                super::frame::native_cell_end_column(
+                    viewport,
+                    (row - top) as usize,
+                    found.end.column,
+                )
+            } else {
+                cols
+            };
+            if start_col < end_col {
+                out.push(SearchHighlight {
+                    display_line: (row - top) as i32,
+                    start_col: start_col as i32,
+                    end_col: end_col as i32,
+                    active: active == Some(index),
+                });
+            }
+        }
+    }
+}
+
 /// Selection spans (parity item 36): block = same columns on every row; linear
 /// = single row, or first row to EOL, full middle rows, last row from column 0.
 pub(crate) fn selection_rects(sel: Selection, size: GridSize, out: &mut Vec<RowSpan>) {

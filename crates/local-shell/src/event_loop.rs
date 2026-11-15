@@ -34,6 +34,14 @@ use oneterm_terminal::{ByteBudget, SharedTerminal, TerminalPump, local_log_ident
 
 use crate::transport::{LocalListener, LocalTransport};
 
+#[cfg(all(test, windows, feature = "ghostty-native"))]
+#[path = "ghostty_pty_tests.rs"]
+mod ghostty_pty_tests;
+
+#[cfg(feature = "ghostty-native")]
+#[path = "ghostty_local.rs"]
+pub mod ghostty_local;
+
 /// PTY read buffer size (1 MiB). Heap-allocated: the owner thread's default
 /// 2 MiB stack must not carry it (PERF-21).
 const READ_BUFFER_SIZE: usize = 0x10_0000;

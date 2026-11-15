@@ -252,6 +252,14 @@ impl From<TerminalError> for PasteError {
 /// documented empty value (`Vec::new()`, `None`, `DynamicColors::default()`)
 /// explicitly instead of inheriting a silent default.
 pub trait TerminalRender: Send + Sync {
+    /// Explicit native paint source. A view polls its own persistent consumer
+    /// instead of calling legacy snapshot_into. This is not a factory selector
+    /// or a promise that legacy query/input contracts are implemented.
+    #[cfg(feature = "ghostty-native")]
+    fn native_render_source(&self) -> Option<&dyn crate::ghostty_content::RenderSource> {
+        None
+    }
+
     /// Snapshot the grid for rendering (does not hold the lock while drawing).
     ///
     /// **Consumes and resets** the terminal damage — call this **only** from the

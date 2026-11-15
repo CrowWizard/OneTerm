@@ -314,9 +314,9 @@ pub fn trusted_shell_config(
 /// Three values and not a `bool`, because the query can in principle fail and
 /// the two honest answers to that are not the same one. `DEC-0019` rule 2
 /// forbids a window claiming an elevation the token did not confirm, so an
-/// unknown process does **not** say "Administrator"; M1-M7 exist to contain an
-/// administrator token, so an unknown process **is** restricted. Fail closed on
-/// the restrictions, fail honest on the marker.
+/// unknown process does **not** say "Administrator" and remains restricted.
+/// Confirmed administrators have ordinary functionality (US-0259). Fail closed
+/// on unknown permissions, fail honest on the marker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Elevation {
     /// The token says this process is not elevated. Every gate is a no-op.
@@ -337,12 +337,10 @@ pub enum Elevation {
 }
 
 impl Elevation {
-    /// Whether the elevated instance's restrictions (M1-M4, M7) apply.
-    ///
-    /// True for [`Elevation::Unknown`]: a process that cannot prove it is
-    /// ordinary is treated as though it were not.
+    /// Whether application permissions must fail closed (US-0259).
+    /// Confirmed administrators have ordinary functionality; Unknown does not.
     pub fn is_restricted(self) -> bool {
-        !matches!(self, Self::NotElevated)
+        matches!(self, Self::Unknown(_))
     }
 
     /// Why the token query failed, for the one log line `run()` emits once the
@@ -427,11 +425,9 @@ pub fn elevation() -> Elevation {
     }
 }
 
-/// Whether this process runs under the elevated instance's restrictions.
-///
-/// The one predicate every gate reads. There is deliberately no `is_elevated()`
-/// beside it: two predicates that differ only in the `Unknown` case is an
-/// invitation to guard a security seam with the wrong one.
+/// Whether an unknown process token requires feature restrictions (US-0259).
+/// Confirmed administrators have full functionality. Identity-sensitive code
+/// must inspect [`elevation`] rather than infer administrator status from this.
 pub fn is_restricted() -> bool {
     elevation().is_restricted()
 }
@@ -616,8 +612,22 @@ mod tests {
             "a process that cannot prove it is ordinary must be treated as though it were not"
         );
         assert_eq!(window_title(unknown), "OneTerm (elevation unknown)");
-        assert!(Elevation::Elevated.is_restricted());
+        assert!(!Elevation::Elevated.is_restricted());
         assert!(!Elevation::NotElevated.is_restricted());
+    }
+
+    #[test]
+    fn confirmed_tokens_have_identical_application_permissions() {
+        assert_eq!(
+            Elevation::Elevated.is_restricted(),
+            Elevation::NotElevated.is_restricted()
+        );
+        assert!(!Elevation::Elevated.is_restricted());
+        assert_ne!(
+            window_title(Elevation::Elevated),
+            window_title(Elevation::NotElevated)
+        );
+        assert!(Elevation::Unknown("query failed").is_restricted());
     }
 
     /// `NEW-9`: the reason survives into the state, so the one log line `run()`
@@ -806,6 +816,24 @@ mod tests {
         let error = trusted_shell_config(&cfg, |_| unreachable!("Custom must not resolve"))
             .expect_err("Custom must never be elevatable");
         assert!(error.to_string().contains("Command Prompt"));
+    }
+
+    #[test]
+    fn pwsh_configured_executable_cannot_override_elevated_trust() {
+        let cfg = LocalShellConfig {
+            kind: ShellKind::Pwsh,
+            program: Some(PathBuf::from(r"D:\Program\PowerShell\7\pwsh.exe")),
+            ..Default::default()
+        };
+        let trusted = trusted_shell_config(&cfg, |shell| {
+            assert_eq!(shell, ElevatedShell::Pwsh);
+            Ok(r"X:\Program Files\PowerShell\7\pwsh.exe".into())
+        })
+        .unwrap();
+        assert_eq!(
+            trusted.program,
+            Some(PathBuf::from(r"X:\Program Files\PowerShell\7\pwsh.exe"))
+        );
     }
 
     #[test]

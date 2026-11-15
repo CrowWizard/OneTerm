@@ -53,6 +53,7 @@ const NEXT_ID_FIELD: &str = "next_session_id";
 const SESSIONS_FIELD: &str = "sessions";
 const ID_FIELD: &str = "id";
 const SEALED_FIELD: &str = "sealed_password";
+const STARTUP_ID_FIELD: &str = "startup_session_id";
 
 // ── SshSession ───────────────────────────────────────────────────────
 
@@ -276,6 +277,7 @@ pub struct SshSessionStore {
     entries: Vec<SshSessionEntry>,
     /// The id handed to the next added session (persisted as `next_session_id`).
     next_id: u64,
+    startup_session_id: Option<SshSessionId>,
     /// Coalescing single-flight queue so background writes never complete
     /// out of order: only the newest pending snapshot reaches disk.
     persist_queue: Arc<Mutex<PersistQueue<SessionDocument>>>,
@@ -290,6 +292,7 @@ pub struct SshSessionStore {
 struct SessionDocument {
     entries: Vec<SshSessionEntry>,
     next_id: u64,
+    startup_session_id: Option<SshSessionId>,
 }
 
 /// Outcome of reading `ssh_session.json`.
@@ -307,6 +310,7 @@ impl LoadedSessions {
             document: SessionDocument {
                 entries: Vec::new(),
                 next_id: 1,
+                startup_session_id: None,
             },
             needs_resave: false,
         }
@@ -321,10 +325,16 @@ fn drain_persist_queue(queue: &Arc<Mutex<PersistQueue<SessionDocument>>>, path: 
 }
 
 impl SshSessionStore {
+    /// Creation shares ordinary persistence permissions (US-0259).
+    pub(crate) fn may_create(&self) -> bool {
+        self.may_persist()
+    }
+
     fn with_document(document: SessionDocument) -> Self {
         Self {
             entries: document.entries,
             next_id: document.next_id,
+            startup_session_id: document.startup_session_id,
             persist_queue: PersistQueue::new(),
             persist_blocked: false,
         }
@@ -341,6 +351,35 @@ impl SshSessionStore {
             .iter()
             .find(|entry| entry.id == id)
             .map(|entry| &entry.session)
+    }
+
+    /// The optional stable id selected for an ordinary application's startup.
+    pub fn startup_session_id(&self) -> Option<SshSessionId> {
+        self.startup_session_id
+    }
+
+    /// Select, replace, or disable the startup connection. Invalid ids do not
+    /// change the preference; restricted or unreadable stores cannot change it.
+    pub(crate) fn set_startup_session(
+        &mut self,
+        id: Option<SshSessionId>,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        if !self.may_persist() {
+            return;
+        }
+        if self.select_startup_session(id) {
+            cx.notify();
+            self.save(cx);
+        }
+    }
+
+    fn select_startup_session(&mut self, id: Option<SshSessionId>) -> bool {
+        if self.startup_session_id == id || id.is_some_and(|id| self.get(id).is_none()) {
+            return false;
+        }
+        self.startup_session_id = id;
+        true
     }
 
     /// Follow `jump_host` links from `first` and return the hops outermost
@@ -450,6 +489,9 @@ impl SshSessionStore {
         let before = self.entries.len();
         self.entries.retain(|entry| entry.id != id);
         if self.entries.len() != before {
+            if self.startup_session_id == Some(id) {
+                self.startup_session_id = None;
+            }
             cx.notify();
             self.save(cx);
         }
@@ -517,6 +559,7 @@ impl SshSessionStore {
         SessionDocument {
             entries: self.entries.clone(),
             next_id: self.next_id,
+            startup_session_id: self.startup_session_id,
         }
     }
 
@@ -539,18 +582,14 @@ impl SshSessionStore {
             .detach();
     }
 
-    /// Whether this process may write `ssh_session.json` at all.
+    /// Whether this process may write a complete Session snapshot.
     ///
-    /// Two reasons it may not. **M4** (`DEC-0019`): an elevated window never
-    /// writes it — unreachable under M1, which leaves it no surface that can
-    /// edit a session, so this is belt and braces. And the pre-existing one: the
-    /// file could not be read at startup and may still be the user's.
-    ///
-    /// A named predicate rather than two `if`s inside [`Self::save`], so the M4
-    /// half has a test that needs no gpui `Context` (`IN-0043` MIN-5).
+    /// Unknown tokens fail closed (US-0259). Independently, a file unreadable
+    /// at startup must not be overwritten by an in-memory fallback. Confirmed
+    /// administrators use the same snapshot writer as ordinary windows.
     fn may_persist(&self) -> bool {
         if oneterm_core::elevation::is_restricted() {
-            log::debug!("elevated window: not writing {DOCUMENT_NAME}");
+            log::debug!("unknown process token: not writing {DOCUMENT_NAME}");
             return false;
         }
         if self.persist_blocked {
@@ -572,6 +611,9 @@ impl SshSessionStore {
             }
         };
         value[NEXT_ID_FIELD] = Value::from(document.next_id);
+        if let Some(id) = document.startup_session_id {
+            value[STARTUP_ID_FIELD] = Value::from(id.raw());
+        }
         if let Err(error) = set_schema_version(&mut value, CURRENT_SCHEMA_VERSION) {
             log::error!("Failed to version ssh sessions: {error}");
             return;
@@ -780,8 +822,28 @@ fn parse_document_inner(raw: &str) -> std::io::Result<LoadedSessions> {
         .get(NEXT_ID_FIELD)
         .and_then(Value::as_u64)
         .ok_or_else(|| invalid("ssh_session.json is missing next_session_id"))?;
+    let mut startup_session_id = match value.get(STARTUP_ID_FIELD) {
+        None | Some(Value::Null) => None,
+        Some(value) => match value.as_u64().filter(|id| *id > 0) {
+            Some(id) => Some(SshSessionId(id)),
+            None => {
+                log::warn!("{DOCUMENT_NAME}: invalid {STARTUP_ID_FIELD} ignored");
+                None
+            }
+        },
+    };
+    if (repaired || source_version < CURRENT_SCHEMA_VERSION) && startup_session_id.take().is_some()
+    {
+        log::warn!(
+            "{DOCUMENT_NAME}: session identities were repaired; startup connection disabled"
+        );
+    }
     Ok(LoadedSessions {
-        document: SessionDocument { entries, next_id },
+        document: SessionDocument {
+            entries,
+            next_id,
+            startup_session_id,
+        },
         needs_resave: source_version < CURRENT_SCHEMA_VERSION || repaired,
     })
 }
@@ -920,6 +982,7 @@ mod tests {
         let store = SshSessionStore::with_document(SessionDocument {
             entries: Vec::new(),
             next_id: 1,
+            startup_session_id: None,
         });
         assert!(
             store.may_persist(),
@@ -929,9 +992,17 @@ mod tests {
         oneterm_core::elevation::set_elevation(oneterm_core::elevation::Elevation::Elevated);
         let _restricted = RestrictedElevation;
         assert!(
-            !store.may_persist(),
-            "an elevated window must write no saved sessions"
+            store.may_create(),
+            "confirmed administrators may create Sessions"
         );
+        assert!(
+            store.may_persist(),
+            "confirmed administrators may save Sessions"
+        );
+        super::persistence_tests::assert_administrator_snapshot_roundtrip();
+        oneterm_core::elevation::set_elevation(oneterm_core::elevation::Elevation::Unknown("test"));
+        assert!(!store.may_create());
+        assert!(!store.may_persist());
 
         // ...and the unreadable-file refusal still stands on its own reason.
         drop(_restricted);
@@ -941,9 +1012,11 @@ mod tests {
             ..SshSessionStore::with_document(SessionDocument {
                 entries: Vec::new(),
                 next_id: 1,
+                startup_session_id: None,
             })
         };
         assert!(!blocked.may_persist());
+        assert!(!blocked.may_create());
     }
 
     #[test]
@@ -1132,6 +1205,7 @@ mod tests {
         SshSessionStore::with_document(SessionDocument {
             entries,
             next_id: 100,
+            startup_session_id: None,
         })
     }
 
@@ -1316,6 +1390,7 @@ mod tests {
         let before = SshSessionStore::with_document(SessionDocument {
             entries: vec![host(1, "10.9.0.1"), host(2, "10.9.0.2")],
             next_id: 3,
+            startup_session_id: None,
         });
         let sections = crate::tree_builder::menu_entries(before.sessions());
         assert_eq!(sections.len(), 1, "neither session is grouped");
@@ -1329,6 +1404,7 @@ mod tests {
         let after = SshSessionStore::with_document(SessionDocument {
             entries: vec![host(2, "10.9.0.2")],
             next_id: 3,
+            startup_session_id: None,
         });
         assert_eq!(
             after.get(clicked).map(|s| s.host.as_str()),
@@ -1350,6 +1426,17 @@ mod us0158_verify_tests;
 #[cfg(test)]
 mod persistence_tests {
     use super::*;
+
+    pub(super) fn assert_administrator_snapshot_roundtrip() {
+        let directory = temporary_dir("administrator-snapshot");
+        let path = directory.join(DOCUMENT_NAME);
+        let snapshot = document(vec![(1, session("administrator"))], 2);
+        SshSessionStore::save_snapshot(&snapshot, &path);
+        assert_eq!(
+            SshSessionStore::load_from(&path).unwrap().document,
+            snapshot
+        );
+    }
 
     /// Removes the per-test directory when the test ends — on failure too, so a
     /// panicking assertion never leaks temporary files (ERR-15).
@@ -1416,6 +1503,7 @@ mod persistence_tests {
                 })
                 .collect(),
             next_id,
+            startup_session_id: None,
         }
     }
 
@@ -1990,6 +2078,94 @@ mod persistence_tests {
             persist_blocked: true,
             ..SshSessionStore::with_document(document(entries, 9))
         }
+    }
+
+    #[test]
+    fn startup_selection_can_be_replaced_disabled_but_never_retargeted() {
+        let mut store = unpersisted(vec![(1, session("one")), (2, session("two"))]);
+        assert_eq!(store.startup_session_id(), None);
+        assert!(store.select_startup_session(Some(SshSessionId(1))));
+        assert!(!store.select_startup_session(Some(SshSessionId(1))));
+        assert!(!store.select_startup_session(Some(SshSessionId(99))));
+        assert_eq!(store.startup_session_id(), Some(SshSessionId(1)));
+        assert!(store.select_startup_session(Some(SshSessionId(2))));
+        assert_eq!(store.startup_session_id(), Some(SshSessionId(2)));
+        assert!(store.select_startup_session(None));
+        assert_eq!(store.startup_session_id(), None);
+    }
+
+    #[test]
+    fn startup_preference_round_trips_without_secret_or_schema_changes() {
+        let directory = temporary_dir("startup-round-trip");
+        let path = directory.join(DOCUMENT_NAME);
+        let mut snapshot = document(vec![(1, session("one"))], 2);
+        snapshot.startup_session_id = Some(SshSessionId(1));
+        SshSessionStore::save_snapshot(&snapshot, &path);
+        let loaded = SshSessionStore::load_from(&path).unwrap();
+        assert_eq!(loaded.document, snapshot);
+        assert!(!loaded.needs_resave);
+        let raw: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(raw["schema_version"], 2);
+        snapshot.startup_session_id = None;
+        SshSessionStore::save_snapshot(&snapshot, &path);
+        let raw: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(raw.get(STARTUP_ID_FIELD).is_none());
+    }
+
+    #[test]
+    fn malformed_or_dangling_startup_ids_do_not_damage_or_retarget_sessions() {
+        for value in [json!("1"), json!(-1), json!(0), json!({}), json!(true)] {
+            let mut raw = json!({"schema_version": 2, "next_session_id": 2,
+                "sessions": [{"id": 1, "label": "one", "host": "host", "group": null}]});
+            raw[STARTUP_ID_FIELD] = value;
+            let loaded = parse_document(&raw.to_string()).unwrap();
+            assert_eq!(loaded.document.entries.len(), 1);
+            assert_eq!(loaded.document.startup_session_id, None);
+        }
+        let loaded = parse_document(
+            &json!({"schema_version": 2, "next_session_id": 2,
+            "startup_session_id": 99,
+            "sessions": [{"id": 1, "label": "one", "host": "host", "group": null}]})
+            .to_string(),
+        )
+        .unwrap();
+        let store = SshSessionStore::with_document(loaded.document);
+        let id = store.startup_session_id().unwrap();
+        assert_eq!(id, SshSessionId(99));
+        assert!(store.get(id).is_none());
+    }
+
+    #[test]
+    fn identity_repairs_disable_automatic_connection_instead_of_retargeting_it() {
+        let loaded = parse_document(
+            &json!({"schema_version": 2, "next_session_id": 1,
+            "startup_session_id": 1,
+            "sessions": [{"label": "different", "host": "host", "group": null}]})
+            .to_string(),
+        )
+        .unwrap();
+        assert!(loaded.needs_resave);
+        assert_eq!(loaded.document.entries[0].id, SshSessionId(1));
+        assert_eq!(loaded.document.startup_session_id, None);
+    }
+
+    #[gpui::test]
+    fn removing_the_selected_session_clears_startup_but_duplication_does_not_copy_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let store = cx.new(|_| {
+            let mut store = unpersisted(vec![(1, session("one")), (2, session("two"))]);
+            store.select_startup_session(Some(SshSessionId(1)));
+            store
+        });
+        store.update(cx, |store, cx| {
+            assert!(store.duplicate(SshSessionId(1), cx).is_some());
+            assert_eq!(store.startup_session_id(), Some(SshSessionId(1)));
+            store.remove(SshSessionId(2), cx);
+            assert_eq!(store.startup_session_id(), Some(SshSessionId(1)));
+            store.remove(SshSessionId(1), cx);
+            assert_eq!(store.startup_session_id(), None);
+        });
     }
 
     /// Rework D4: without `VaultState` the reset wipe would be skipped

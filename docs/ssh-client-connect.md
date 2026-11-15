@@ -1,5 +1,21 @@
 # SSH Client Connect Design — OneTerm
 
+Terminal context-menu extension (US-0253): right-click a native terminal,
+legacy terminal or empty Space, then New SSH. Quick Connect... opens the
+existing quick-connect dialog; saved sessions open the existing saved-session
+connect dialog by stable id. The submenu reads the current grouped list each
+time it opens, scrolls long lists and shows an inert placeholder when empty.
+Connections retain existing new-tab placement, token restrictions and trust/
+authentication handling. No network starts merely by opening the menu.
+
+Native workspace extension (US-0252): direct native SSH now opens optional
+SFTP before transferring the authenticated handle into its owner; the shell
+and browser share one login. Setup cancellation returns cancellation, while
+unsupported SFTP keeps the terminal usable. Existing auth/trust and isolated
+known_hosts policy are unchanged. Native capabilities feed the existing
+workspace-scoped file browser, with observed cancellation/transport teardown.
+External-server desktop acceptance remains separate from loopback proof.
+
 > **Status:** Historical design record. For current crate ownership and paths, see [`docs/architecture.md`](architecture.md). For the accepted password and private-key authentication behavior, see [`docs/ssh-authentication.md`](ssh-authentication.md).
 >
 > **Current state (review refresh 2026-08, Phase 2).** The shipped code in
@@ -54,6 +70,29 @@
 ---
 
 ## 1. Overview & flow
+
+### Optional startup connection
+
+Right-click a saved session and check **Connect on Startup** to select it as the
+single default connection (`US-0207`). Check another session to replace it, or
+uncheck the selected one to disable startup connection. Removing the selected
+session clears it; duplicating a saved session leaves the selection unchanged.
+The selection is persisted by stable id, not by label or position.
+
+An ordinary application launch with no pending crash-recovery dialog opens the
+existing connection form after the main window is ready and attempts once when
+the username and all authentication forms are ready. Agent and configured
+private-key methods can attempt immediately; an encrypted key may still require
+its passphrase after that attempt. Password forms need an unlocked saved
+password, otherwise the form waits for user input. Unlocking the vault explicitly
+allows the pending startup attempt when every password form is ready. Cancel
+prevents any deferred attempt. Host-key approval, cancellation, and error handling
+are the normal saved-session flow, with no automatic retry. A missing id is
+reported and never replaced with another session. Administrator/unknown-token
+launches never auto-connect, and the initial local-shell tab is retained.
+
+Confirmed administrator windows permit explicit connections and SFTP, but cannot
+change saved sessions or save credentials (`US-0206`).
 
 ### 1.1. Feature description
 
@@ -1241,6 +1280,16 @@ other sessions (CORR-17).
 
 ### 9.3. Host key verification
 
+Default-off native workspace staging (US-0251) uses the same authentication and
+trust dialogs through tagged `SessionFactory::create_ssh`. Its direct-only
+backend explicitly selects `config_dir()/known_hosts` (the EXE-sibling isolated
+root), not the daily OpenSSH trust file described below. Unknown/changed keys,
+approval, keepalive and connection deadlines retain the shared policy. Jump
+hosts, port/agent forwarding and enabled output logging reject before network
+or authentication; local-agent authentication is distinct and remains supported.
+There is no SFTP channel, automatic startup SSH or legacy fallback in this slice.
+
+
 Host keys are verified fail-closed against the OpenSSH `known_hosts` file
 (`~/.ssh/known_hosts`) by `crates/ssh/src/handler.rs` (`SshClientHandler`).
 Every entry recorded for `host` (`[host]:port` when the port is not 22, hashed
@@ -1289,6 +1338,13 @@ impl Debug for SshConfig {
 ```
 
 ### 9.5. Keyboard focus in the dialog
+
+Empty split Spaces offer **New SSH Here** with Quick Connect and saved
+sessions. Both use the ordinary authentication/trust flow and capture the
+clicked Space, not the later active one. If that Space or its tab disappears
+or becomes occupied, show a warning and observe unplaced-session cleanup;
+never replace a session or open a fallback tab. Live-terminal **New SSH**
+continues to open a new tab.
 
 - When the dialog opens, focus the first field (username if asked, password if not).
 - Enter in the password field → trigger Connect (call `on_ok`).

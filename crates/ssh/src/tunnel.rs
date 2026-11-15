@@ -45,6 +45,7 @@ pub(crate) type ForwardTable = Arc<Mutex<HashMap<(String, u32), (String, u16)>>>
 /// What every listener and relay needs from the session.
 #[derive(Clone)]
 pub(crate) struct ForwardContext {
+    pub(crate) tasks: tokio_util::task::TaskTracker,
     pub(crate) open_tx: mpsc::Sender<HandleRequest>,
     pub(crate) shutdown: CancellationToken,
     /// Warnings reach the terminal as toasts through the session event channel.
@@ -63,6 +64,13 @@ impl ForwardContext {
 /// Serve one request on the connection handle (called from `ssh_main_task`).
 pub(crate) async fn serve_handle_request(
     handle: &Handle<SshClientHandler>,
+    request: HandleRequest,
+) {
+    serve_native_handle_request(handle, request).await;
+}
+
+pub(crate) async fn serve_native_handle_request<H: russh::client::Handler>(
+    handle: &Handle<H>,
     request: HandleRequest,
 ) {
     match request {
@@ -180,7 +188,7 @@ async fn listen(
         "SshSession: forward {} listening on {address}",
         spec.summary()
     );
-    tokio::spawn(accept_loop(listener, relay, ctx.clone()));
+    ctx.tasks.spawn(accept_loop(listener, relay, ctx.clone()));
     Some(address)
 }
 
@@ -190,7 +198,14 @@ async fn accept_loop(listener: TcpListener, relay: RelayKind, ctx: ForwardContex
             _ = ctx.shutdown.cancelled() => break,
             accepted = listener.accept() => match accepted {
                 Ok((tcp, peer)) => {
-                    tokio::spawn(relay_connection(tcp, peer, relay.clone(), ctx.clone()));
+                    let operation = relay_connection(tcp, peer, relay.clone(), ctx.clone());
+                    let shutdown = ctx.shutdown.clone();
+                    ctx.tasks.spawn(async move {
+                        tokio::select! {
+                            _ = shutdown.cancelled() => {}
+                            _ = operation => {}
+                        }
+                    });
                 }
                 Err(error) => {
                     log::debug!("SshSession: forward accept failed: {error}");
@@ -259,8 +274,13 @@ pub(crate) fn spawn_forwarded_tcpip(
     channel: Channel<Msg>,
     target: (String, u16),
     shutdown: CancellationToken,
+    tasks: tokio_util::task::TaskTracker,
 ) {
-    tokio::spawn(async move {
+    let cancel = shutdown.clone();
+    tasks.spawn(async move {
+        tokio::select! {
+        _ = cancel.cancelled() => {}
+        _ = async move {
         let mut tcp = match TcpStream::connect((target.0.as_str(), target.1)).await {
             Ok(tcp) => tcp,
             Err(error) => {
@@ -280,6 +300,8 @@ pub(crate) fn spawn_forwarded_tcpip(
                     log::debug!("SshSession: remote forward relay ended: {error}");
                 }
             }
+        }
+        } => {}
         }
     });
 }

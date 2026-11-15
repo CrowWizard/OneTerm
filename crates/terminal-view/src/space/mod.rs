@@ -14,6 +14,7 @@ mod render;
 #[cfg(test)]
 mod tests;
 mod tree;
+pub(crate) use render::PaneView;
 
 pub(crate) use tree::{
     CloseOutcome, SpaceContent, SpaceId, SpaceLeaf, SpaceTree, SplitContext, SplitDir,

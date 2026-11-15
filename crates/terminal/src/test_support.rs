@@ -436,6 +436,8 @@ pub struct FakeTerminalSession {
     state: Arc<FakeSessionState>,
     event_rx: Mutex<Option<Receiver<SessionEvent>>>,
     kind: SessionKind,
+    #[cfg(feature = "ghostty-native")]
+    native_model: Option<crate::ghostty_model::SharedModel>,
 }
 
 struct FakeSessionState {
@@ -492,6 +494,8 @@ impl FakeTerminalSession {
                 state,
                 event_rx: Mutex::new(Some(event_rx)),
                 kind,
+                #[cfg(feature = "ghostty-native")]
+                native_model: None,
             },
             probe,
         )
@@ -517,6 +521,14 @@ impl FakeTerminalSession {
         (Box::new(session), probe)
     }
 
+    /// Route render reads to a real native model while leaving legacy snapshot
+    /// counters available to detect accidental fallback in view tests.
+    #[cfg(feature = "ghostty-native")]
+    pub fn with_native_render_model(mut self, model: crate::ghostty_model::SharedModel) -> Self {
+        self.native_model = Some(model);
+        self
+    }
+
     /// Append one observed [`TerminalInput`] call.
     fn record(&self, call: FakeInputCall) {
         self.state.input_calls.lock().unwrap().push(call);
@@ -530,6 +542,11 @@ impl FakeTerminalSession {
 impl TerminalSession for FakeTerminalSession {}
 
 impl TerminalRender for FakeTerminalSession {
+    #[cfg(feature = "ghostty-native")]
+    fn native_render_source(&self) -> Option<&dyn crate::ghostty_content::RenderSource> {
+        self.native_model.as_ref().map(|model| model as _)
+    }
+
     fn snapshot(&self) -> TerminalContent {
         self.state.snapshot_calls.fetch_add(1, Ordering::SeqCst);
         self.state.engine.lock().unwrap().snapshot()

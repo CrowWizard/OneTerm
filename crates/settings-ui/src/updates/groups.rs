@@ -20,7 +20,7 @@ const CHANNEL_PREVIEW: &str = "preview";
 
 /// The one line the Updates group shows in an elevated window (`DEC-0019` M2).
 pub(crate) const ELEVATED_UPDATES_TEXT: &str =
-    "Updates are checked and installed from the normal OneTerm window.";
+    "Updates are unavailable because the process token could not be verified.";
 
 /// Build the About-page update group.
 ///

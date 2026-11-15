@@ -42,7 +42,11 @@ impl TerminalView {
         }
         // The frame's modes are at most one paint old; read once, so the
         // classification and the encoding cannot disagree about them.
-        let modes = self.render_state.borrow().frame.modes();
+        let Some(modes) = self.render_state.borrow().frame.modes() else {
+            // Native GUI key dispatch is a separate adapter; never encode with
+            // a legacy power-on mode snapshot while a native frame is painted.
+            return;
+        };
         let ctx = KeyContext {
             search_focused: matches!(key, "enter" | "return")
                 && self.search.input_is_focused(window, cx),
@@ -171,7 +175,9 @@ impl TerminalView {
             return;
         };
         self.held_keys.remove(at);
-        let modes = self.render_state.borrow().frame.modes();
+        let Some(modes) = self.render_state.borrow().frame.modes() else {
+            return;
+        };
         // This pane's own session and no fan-out: a peer that negotiated
         // nothing must not receive a `:3` it has never seen a press for.
         send_key(&self.session, &event, &modes, cx);
@@ -206,7 +212,9 @@ impl TerminalView {
             return;
         }
         let session = self.session.clone();
-        let modes = self.render_state.borrow().frame.modes();
+        let Some(modes) = self.render_state.borrow().frame.modes() else {
+            return;
+        };
         // The modifiers that were held are not part of a blur, so each release
         // is reported unmodified — the key itself is what the program tracks.
         for spec in std::mem::take(&mut self.held_keys) {

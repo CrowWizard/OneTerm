@@ -31,8 +31,8 @@ use oneterm_settings::TerminalSettings;
 /// local terminals start is one of the first settings a new user looks for, so
 /// it sits on the page the Settings window opens on rather than down the
 /// Terminal page.
-pub(super) fn shell_group() -> SettingGroup {
-    shell::group()
+pub(super) fn shell_group(cx: &App) -> SettingGroup {
+    shell::group(cx)
 }
 
 /// A terminal page: title, sidebar icon, the description shown under the page
@@ -166,7 +166,7 @@ mod tests {
     fn the_shell_group_is_hosted_by_general_and_not_by_a_terminal_page() {
         // `US-0122` moved it; this is the assertion that it did not come back
         // and end up on two pages at once.
-        let shell = shell::group as fn() -> SettingGroup as usize;
+        let shell = shell::group as fn(&App) -> SettingGroup as usize;
         assert!(!placed_builders().contains(&shell));
     }
 }

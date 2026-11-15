@@ -65,7 +65,42 @@ pub(crate) fn open_connect_dialog(
     window: &mut Window,
     cx: &mut App,
 ) {
+    open_connect_dialog_with_startup(session, id, false, None, window, cx);
+}
+
+pub(crate) fn open_connect_dialog_to(
+    session: SshSession,
+    id: SshSessionId,
+    completion: oneterm_state::commands::SshDuplicateCompletion,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    open_connect_dialog_with_startup(session, id, false, Some(completion), window, cx);
+}
+
+/// The startup entry uses the same form, cancellation and security checks.
+pub(crate) fn open_startup_connect_dialog(
+    session: SshSession,
+    id: SshSessionId,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    open_connect_dialog_with_startup(session, id, true, None, window, cx);
+}
+
+fn open_connect_dialog_with_startup(
+    session: SshSession,
+    id: SshSessionId,
+    auto_connect: bool,
+    completion: Option<oneterm_state::commands::SshDuplicateCompletion>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if !oneterm_actions::action_allowed_when_elevated("open_session") {
+        return;
+    }
     let ask_username = session.username.is_none();
+    let may_save = !oneterm_core::elevation::is_restricted();
 
     // Dialog title.
     let title: String = if ask_username {
@@ -100,7 +135,7 @@ pub(crate) fn open_connect_dialog(
     };
     let auth_form = SshAuthForm::new(session.auth_method, session.key_path.as_deref(), window, cx);
     auth_form.set_saved(SavedPassword::of(&session));
-    auth_form.offer_save(session.auth_method == SshAuthPreference::Password);
+    auth_form.offer_save(may_save && session.auth_method == SshAuthPreference::Password);
     let mut password_forms: Vec<SshAuthForm> = hop_forms.forms().cloned().collect();
     if was_rejected(id, &session, cx) {
         // Rejected after a host-key approval closed the last dialog: open with
@@ -134,6 +169,7 @@ pub(crate) fn open_connect_dialog(
     let connecting = Arc::new(AtomicBool::new(false));
     let connection_cancellation: Rc<RefCell<Option<ConnectionCancellation>>> =
         Rc::new(RefCell::new(None));
+    let startup_pending = Rc::new(Cell::new(auto_connect && may_save));
 
     // ── Shared connect logic (Connect button + keyboard Enter) ──
     let attempt: Rc<dyn Fn(&mut Window, &mut App) -> bool> = Rc::new({
@@ -145,10 +181,13 @@ pub(crate) fn open_connect_dialog(
         let connection_cancellation = connection_cancellation.clone();
         let connecting = connecting.clone();
         let inline_error = inline_error.clone();
+        let startup_pending = startup_pending.clone();
         move |window, cx| {
             if connecting.load(Ordering::Relaxed) {
                 return false;
             }
+            // A manual attempt supersedes any still-pending startup attempt.
+            startup_pending.set(false);
             // A retry starts clean; the failure of this attempt replaces it.
             inline_error.clear();
             on_connect_click(
@@ -157,10 +196,11 @@ pub(crate) fn open_connect_dialog(
                 &username_state,
                 &auth_form,
                 &hop_forms,
-                save_username.get() || auth_form.save_ticked(),
+                may_save && (save_username.get() || auth_form.save_ticked()),
                 &connection_cancellation,
                 connecting.clone(),
                 inline_error.clone(),
+                completion.clone(),
                 window,
                 cx,
             )
@@ -173,7 +213,7 @@ pub(crate) fn open_connect_dialog(
         let auth_form = auth_form.clone();
         let connecting = connecting.clone();
         move |window, cx| {
-            if connecting.load(Ordering::Relaxed) || !auth_form.save_ticked() {
+            if connecting.load(Ordering::Relaxed) || !may_save || !auth_form.save_ticked() {
                 return attempt(window, cx);
             }
             if auth_form.typed_is_empty(cx) {
@@ -219,11 +259,31 @@ pub(crate) fn open_connect_dialog(
     });
 
     let connect_button = cx.new(|_| ConnectButton::new(connect_logic.clone(), connecting));
+    let startup_attempt: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new({
+        let mut forms: Vec<SshAuthForm> = hop_forms.forms().cloned().collect();
+        forms.push(auth_form.clone());
+        let startup_pending = startup_pending.clone();
+        let connect_logic = connect_logic.clone();
+        let username_ready = session
+            .username
+            .as_deref()
+            .is_some_and(|user| !user.trim().is_empty());
+        move |window, cx| {
+            if startup_pending.get()
+                && username_ready
+                && forms.iter().all(|form| form.ready_for_startup(cx))
+            {
+                startup_pending.set(false);
+                connect_logic(window, cx);
+            }
+        }
+    });
     let initial_focus_pending = Rc::new(Cell::new(true));
     let refocus = initial_focus_pending.clone();
     let cancel_connection = {
         let connection_cancellation = connection_cancellation.clone();
         move |_: &mut Window, _: &mut App| {
+            startup_pending.set(false);
             if let Some(cancellation) = connection_cancellation.borrow().as_ref() {
                 cancellation.cancel();
             }
@@ -272,25 +332,28 @@ pub(crate) fn open_connect_dialog(
                 // "Save username" checkbox — only shown when ask_username. A
                 // saved password is bound to a username, so ticking "Save
                 // password" ticks and locks this one too.
-                .when_some(username_state.as_ref(), |content, _st| {
-                    let forced = auth_form.save_ticked();
-                    content.child(
-                        div().pt_1().child(
-                            Checkbox::new("save-username")
-                                .items_center()
-                                .accessibility_label("Save username to session")
-                                .child(control_label("Save username to session"))
-                                .checked(save_username.get() || forced)
-                                .disabled(forced)
-                                .on_click({
-                                    let save_username = save_username.clone();
-                                    move |checked: &bool, _window, _cx| {
-                                        save_username.set(*checked);
-                                    }
-                                }),
-                        ),
-                    )
-                })
+                .when_some(
+                    username_state.as_ref().filter(|_| may_save),
+                    |content, _st| {
+                        let forced = auth_form.save_ticked();
+                        content.child(
+                            div().pt_1().child(
+                                Checkbox::new("save-username")
+                                    .items_center()
+                                    .accessibility_label("Save username to session")
+                                    .child(control_label("Save username to session"))
+                                    .checked(save_username.get() || forced)
+                                    .disabled(forced)
+                                    .on_click({
+                                        let save_username = save_username.clone();
+                                        move |checked: &bool, _window, _cx| {
+                                            save_username.set(*checked);
+                                        }
+                                    }),
+                            ),
+                        )
+                    },
+                )
                 // The failure of the last attempt, under the fields it is about.
                 .when_some(inline_error.render(None, cx), |content, error| {
                     content.child(error)
@@ -306,13 +369,16 @@ pub(crate) fn open_connect_dialog(
     if unlock_first {
         // Stacked on the connect dialog; Cancel ("type the passwords instead")
         // leaves the ordinary inputs.
-        ensure_unlocked(window, cx, move |window, _| {
+        ensure_unlocked(window, cx, move |window, cx| {
             for form in &password_forms {
                 form.use_saved(true);
             }
             refocus.set(true);
             window.refresh();
+            startup_attempt(window, cx);
         });
+    } else if auto_connect {
+        window.defer(cx, move |window, cx| startup_attempt(window, cx));
     }
 }
 
@@ -485,6 +551,7 @@ fn on_connect_click(
     connection_cancellation: &Rc<RefCell<Option<ConnectionCancellation>>>,
     connecting: Arc<AtomicBool>,
     inline_error: InlineError,
+    completion: Option<oneterm_state::commands::SshDuplicateCompletion>,
     window: &mut Window,
     cx: &mut App,
 ) -> bool {
@@ -540,7 +607,8 @@ fn on_connect_click(
     };
 
     // 3. (Optional) Save username/host/port to the store — only when the user ticks the checkbox.
-    if save_username && username_state.is_some() {
+    let may_save = !oneterm_core::elevation::is_restricted();
+    if may_save && save_username && username_state.is_some() {
         let mut updated = session.clone();
         updated.username = Some(username.clone());
         updated.host = host.clone();
@@ -552,7 +620,7 @@ fn on_connect_click(
 
     // 4. Build the connection config and connect off-thread. A password to
     //    save is kept (zeroizing) until the server has accepted it.
-    let to_save = match (auth_form.save_ticked(), &auth) {
+    let to_save = match (may_save && auth_form.save_ticked(), &auth) {
         (true, SshAuthMethod::Password { password }) => Some(password.clone()),
         _ => None,
     };
@@ -590,6 +658,7 @@ fn on_connect_click(
         cfg,
         SshConnectRequest {
             logging_override: session.logging,
+            completion,
             on_connected: Some(on_connected),
             on_failed: Some({
                 let auth_form = auth_form.clone();

@@ -131,6 +131,12 @@ async fn download_file_contents(
             "sftp download: close remote file",
             remote_file.close().await,
         );
+    } else if let Ok(stop) = super::NATIVE_TRANSPORT_STOP.try_with(Clone::clone) {
+        tokio::select! {
+            biased;
+            _ = stop.cancelled() => {}
+            closed = remote_file.close() => report_best_effort("native sftp download: close remote file after failed copy", closed),
+        }
     } else {
         tokio::spawn(async move {
             report_best_effort(

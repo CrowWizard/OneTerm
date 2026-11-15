@@ -31,10 +31,29 @@ const FILES: usize = 5;
 /// A file-system SFTP server rooted at one directory that advertises
 /// `limits@openssh.com` with [`MAX_OPEN_HANDLES`].
 struct LimitedServer {
+    gate: Option<Gate>,
     root: PathBuf,
     next_handle: u64,
     files: HashMap<String, std::fs::File>,
     dirs: HashMap<String, Option<Vec<File>>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct Gate {
+    pub(crate) operation: &'static str,
+    pub(crate) entered: async_channel::Sender<()>,
+    pub(crate) release: async_channel::Receiver<()>,
+}
+
+impl LimitedServer {
+    async fn wait(&self, operation: &str) {
+        if let Some(gate) = &self.gate
+            && gate.operation == operation
+        {
+            let _ = gate.entered.send(()).await;
+            let _ = gate.release.recv().await;
+        }
+    }
 }
 
 fn ok(id: u32) -> Status {
@@ -111,7 +130,20 @@ impl russh_sftp::server::Handler for LimitedServer {
     }
 
     async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
+        self.wait("stat").await;
         self.attrs(id, &path)
+    }
+
+    async fn realpath(&mut self, id: u32, path: String) -> Result<Name, Self::Error> {
+        let path = if path == "." {
+            "/".to_owned()
+        } else {
+            format!("/{}", path.trim_start_matches('/'))
+        };
+        Ok(Name {
+            id,
+            files: vec![File::new(path, FileAttributes::empty())],
+        })
     }
 
     async fn lstat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
@@ -148,6 +180,9 @@ impl russh_sftp::server::Handler for LimitedServer {
         pflags: OpenFlags,
         _attrs: FileAttributes,
     ) -> Result<Handle, Self::Error> {
+        if filename == "/etc/passwd" {
+            self.wait("lookup").await;
+        }
         let file = std::fs::OpenOptions::new()
             .read(pflags.contains(OpenFlags::READ))
             .write(pflags.contains(OpenFlags::WRITE))
@@ -173,6 +208,7 @@ impl russh_sftp::server::Handler for LimitedServer {
         offset: u64,
         len: u32,
     ) -> Result<Data, Self::Error> {
+        self.wait("read").await;
         let file = self.files.get_mut(&handle).ok_or(StatusCode::BadMessage)?;
         file.seek(SeekFrom::Start(offset)).map_err(io_status)?;
         let mut data = Vec::new();
@@ -192,6 +228,7 @@ impl russh_sftp::server::Handler for LimitedServer {
         offset: u64,
         data: Vec<u8>,
     ) -> Result<Status, Self::Error> {
+        self.wait("write").await;
         let file = self.files.get_mut(&handle).ok_or(StatusCode::BadMessage)?;
         file.seek(SeekFrom::Start(offset)).map_err(io_status)?;
         file.write_all(&data).map_err(io_status)?;
@@ -225,7 +262,7 @@ impl russh_sftp::server::Handler for LimitedServer {
 }
 
 /// A scratch directory removed when the test ends.
-pub(super) struct Scratch(pub(super) PathBuf);
+pub(crate) struct Scratch(pub(crate) PathBuf);
 
 impl Drop for Scratch {
     fn drop(&mut self) {
@@ -235,7 +272,7 @@ impl Drop for Scratch {
     }
 }
 
-pub(super) fn scratch(tag: &str) -> Scratch {
+pub(crate) fn scratch(tag: &str) -> Scratch {
     let dir = std::env::temp_dir().join(format!(
         "oneterm-bug0076-{}-{tag}-{}",
         std::process::id(),
@@ -251,9 +288,28 @@ pub(super) fn scratch(tag: &str) -> Scratch {
 /// `sftp_config()`.
 pub(super) async fn limited_session(root: &Path) -> russh_sftp::client::SftpSession {
     let (client_side, server_side) = tokio::io::duplex(1024 * 1024);
+    serve_fixture(server_side, root).await;
+    russh_sftp::client::SftpSession::new_with_config(client_side, sftp_config())
+        .await
+        .expect("sftp handshake")
+}
+
+pub(crate) async fn serve_fixture(
+    stream: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    root: &Path,
+) {
+    serve_gated_fixture(stream, root, None).await;
+}
+
+pub(crate) async fn serve_gated_fixture(
+    stream: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    root: &Path,
+    gate: Option<Gate>,
+) {
     russh_sftp::server::run(
-        server_side,
+        stream,
         LimitedServer {
+            gate,
             root: root.to_path_buf(),
             next_handle: 0,
             files: HashMap::new(),
@@ -261,9 +317,6 @@ pub(super) async fn limited_session(root: &Path) -> russh_sftp::client::SftpSess
         },
     )
     .await;
-    russh_sftp::client::SftpSession::new_with_config(client_side, sftp_config())
-        .await
-        .expect("sftp handshake")
 }
 
 fn write_files(dir: &Path) {

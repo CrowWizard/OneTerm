@@ -87,6 +87,15 @@ the placeholder panel.
 
 ## Ownership shortcuts
 
+Native workspace staging (US-0249) reuses the existing Space tree and renderer:
+the tree is generic over a cloneable pane handle and resolves terminal focus
+through its caller; rendering needs only entity identity and an element. The
+default remains Entity<TerminalView> for standalone tree consumers. TerminalPanel
+now holds a tagged actual legacy/native pane handle and accepts an explicit
+native-session spec. Its real split/move/metric/close path has native ownership
+proof. Production factories and startup remain legacy; this is not completed
+native workspace selection or cutover.
+
 - Terminal behavior and shared terminal capability changes: `crates/terminal/`; printable-output logging behavior is documented in [`terminal-logging.md`](terminal-logging.md).
 - Backend transport and lifecycle: `crates/local-shell/` or `crates/ssh/`.
 - Terminal UI and rendering: `crates/terminal-view/`; the render engine, input layer, view, Spaces and panel

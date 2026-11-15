@@ -20,6 +20,13 @@ use oneterm_state::{
 /// `gpui_component::init(cx)` (called in [`crate::run`]) already initializes the
 /// theme, dock, root, and `PanelRegistry`. This runs afterwards.
 pub(crate) fn init(cx: &mut App) {
+    init_with_factory(cx, crate::session_factory::build());
+}
+
+pub(crate) fn init_with_factory(
+    cx: &mut App,
+    factory: std::sync::Arc<dyn oneterm_terminal::SessionFactory>,
+) {
     // Shared globals (each `init` is idempotent: it installs once and later
     // calls are no-ops). `UiConfig` first so the saved theme/font apply in
     // `theme::init`; the `ui_config.json` theme observer is registered after
@@ -64,13 +71,15 @@ pub(crate) fn init(cx: &mut App) {
     // `SshSessionStore::global`, installed by `oneterm_session_ui::init`.
     AppServices::install(
         cx,
-        crate::session_factory::build(),
+        factory,
         WorkspaceCommands {
             new_terminal_with_shell: oneterm_terminal_view::new_terminal_with_shell_cmd,
             open_quick_connect_dialog: oneterm_session_ui::open_quick_connect_dialog,
+            open_quick_connect_to: oneterm_session_ui::open_quick_connect_to,
             open_new_saved_session_dialog: oneterm_session_ui::open_new_saved_session_dialog,
             saved_ssh_sessions: oneterm_session_ui::saved_ssh_sessions,
             open_saved_ssh_session: oneterm_session_ui::open_saved_ssh_session,
+            open_saved_ssh_session_to: oneterm_session_ui::open_saved_ssh_session_to,
             open_duplicate_ssh_dialog: oneterm_session_ui::open_duplicate_ssh_dialog,
             open_settings: oneterm_settings_ui::open_settings,
             open_about: oneterm_settings_ui::open_about_dialog,

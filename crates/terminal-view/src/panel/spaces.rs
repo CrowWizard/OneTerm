@@ -11,11 +11,14 @@ use oneterm_state::AppState;
 
 use super::TerminalPanel;
 use super::duplicate::{Unplaced, close_unplaced};
+use super::pane::TerminalPane;
 use super::terminal_panel::DEFAULT_TAB_TITLE;
 use crate::space::{CloseOutcome, SpaceContent, SpaceId, SpaceLeaf, SpaceTree, SplitDir};
-use crate::terminal_view::TerminalView;
 
 impl TerminalPanel {
+    pub(crate) fn can_drag_terminal(&self) -> bool {
+        self.tree.drag_terminal_space().is_some()
+    }
     /// Split Space `space_id` in `dir`; the new empty Space becomes active.
     pub(crate) fn split_active_at(
         &mut self,
@@ -91,7 +94,7 @@ impl TerminalPanel {
     ) {
         let (outcome, removed) = self.tree.close(space_id);
         if let Some(view) = removed {
-            view.update(cx, |v, cx| v.shutdown(cx));
+            view.shutdown(cx);
         }
         if outcome == CloseOutcome::LastSpaceClosed {
             self.close_tab(window, cx);
@@ -129,10 +132,11 @@ impl TerminalPanel {
     pub(super) fn place_view(
         &mut self,
         target: SpaceId,
-        view: Entity<TerminalView>,
+        view: impl Into<TerminalPane>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Result<(), Entity<TerminalView>> {
+    ) -> Result<(), TerminalPane> {
+        let view = view.into();
         self.attach_split_ctx(&view, target, cx);
         self.tree.fill_empty(target, view)?;
         self.rebuild_title_subs(cx);
@@ -163,7 +167,7 @@ impl TerminalPanel {
     /// Focus whatever the active Space holds: the terminal view, or the empty
     /// placeholder's own handle.
     pub(super) fn focus_active_space(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(focus) = self.tree.active_focus_handle(cx) {
+        if let Some(focus) = self.tree.active_focus_handle(|view| view.focus(cx)) {
             focus.focus(window, cx);
         }
     }
@@ -177,14 +181,15 @@ impl TerminalPanel {
         cx.notify();
     }
 
-    /// Take the active Space's terminal view out of this tree, leaving it empty
+    /// Take the active terminal, or the sole terminal if an empty Space is
+    /// active, out of this tree, leaving it empty
     /// (and collapsing that Space if other Spaces remain). Used by drag-drop.
     pub(super) fn take_active_terminal_view(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<Entity<TerminalView>> {
-        let id = self.tree.active();
+    ) -> Option<TerminalPane> {
+        let id = self.tree.drag_terminal_space()?;
         let view = self.tree.take_leaf_terminal(id)?;
         if self.tree.leaf_count() > 1 {
             let _ = self.tree.close(id);
@@ -204,7 +209,8 @@ impl TerminalPanel {
 
     /// Handle a Terminal Tab dropped onto empty Space `target`: the dock's own drag of a strip
     /// tab, a rail row or a collapsed cell (`DragPanel`), resolved by [`Self::dragged_by`]; any
-    /// other kind of panel is ignored. Only the tab's active terminal moves.
+    /// other kind of panel is ignored. The active terminal moves, falling back
+    /// to the sole terminal when the active Space is empty.
     pub(crate) fn handle_panel_drop(
         &mut self,
         target: SpaceId,
@@ -217,8 +223,34 @@ impl TerminalPanel {
         }
     }
 
+    /// An occupied Space splits only after a valid cross-tab drop is released.
+    pub(crate) fn handle_split_drop(
+        &mut self,
+        space: SpaceId,
+        direction: SplitDir,
+        drag: &DragPanel,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(source) = Self::dragged_by(drag, cx) else {
+            return;
+        };
+        if source == cx.entity() || source.read(cx).tree.drag_terminal_space().is_none() {
+            return;
+        }
+        if !self.tree.has_leaf(space) {
+            return;
+        }
+        let target = if self.tree.leaf_terminal(space).is_some() {
+            self.split_tree(space, direction, cx)
+        } else {
+            space
+        };
+        self.move_tab_into(target, source, window, cx);
+    }
+
     /// Move `source`'s active terminal into the empty Space `target` of this tab.
-    fn move_tab_into(
+    pub(super) fn move_tab_into(
         &mut self,
         target: SpaceId,
         source: Entity<TerminalPanel>,
@@ -278,7 +310,7 @@ impl TerminalPanel {
     /// resort only — the drop path guards the destination before taking.
     fn restore_dropped_view(
         &mut self,
-        view: Entity<TerminalView>,
+        view: TerminalPane,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -286,7 +318,7 @@ impl TerminalPanel {
         if let Err(view) = self.place_view(home, view, window, cx) {
             // Nowhere left to place it: release the session explicitly.
             log::error!("move_tab_into: source Space is no longer empty; closing terminal");
-            view.update(cx, |view, cx| view.shutdown(cx));
+            view.shutdown(cx);
             cx.notify();
         }
     }
@@ -318,12 +350,11 @@ impl TerminalPanel {
     pub(super) fn publish_active_session(&mut self, cx: &mut Context<Self>) {
         let (sftp, cwd_source, is_local) = match self.tree.active_terminal() {
             Some(view) => {
-                let session = view.read(cx).session.read(cx);
-                let capabilities = session.capabilities();
+                let capabilities = view.capabilities(cx);
                 (
                     capabilities.sftp,
                     capabilities.cwd_source,
-                    session.kind().is_local(),
+                    view.kind(cx).is_some_and(|kind| kind.is_local()),
                 )
             }
             None => (None, None, true),

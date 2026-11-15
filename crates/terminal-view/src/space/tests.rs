@@ -1,13 +1,146 @@
 //! Unit tests for `SpaceTree` split/close/fill operations (ARCH-07).
 //!
 //! These tests verify tree consistency after each operation — leaf counts,
-//! active id, find_leaf, and collapse behavior. They use `SpaceContent::Empty`
-//! leaves (no GPUI entities needed) so they run as pure unit tests.
+//! active id, find_leaf, and collapse behavior. Empty leaves and tagged pane
+//! identities exercise ownership without constructing terminal sessions.
 
 use gpui::{AppContext as _, FocusHandle};
 
 use super::tree::{SpaceContent, SpaceId, SpaceLeaf, SpaceNode};
-use super::{CloseOutcome, SpaceTree, SplitDir};
+use super::{CloseOutcome, SplitDir};
+
+type SpaceTree = super::SpaceTree;
+
+/// Distinct pane identities exercise the shared tree without a legacy session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PaneIdentity {
+    Legacy(u64),
+    Native(u64),
+}
+
+#[gpui::test]
+fn tab_drag_uses_active_or_unambiguous_sole_terminal(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+        let focus = cx.focus_handle();
+        let mut tree = super::SpaceTree::new_terminal(PaneIdentity::Native(1), focus.clone());
+        let original = tree.active();
+        assert_eq!(tree.drag_terminal_space(), Some(original));
+        let empty = tree.alloc_id();
+        let state = cx.new(|_| gpui_component::resizable::ResizableState::default());
+        tree.split(
+            original,
+            SplitDir::Right,
+            SpaceLeaf {
+                id: empty,
+                content: SpaceContent::Empty,
+                focus: focus.clone(),
+            },
+            state,
+        );
+        assert_eq!(tree.drag_terminal_space(), Some(original));
+        tree.fill_empty(empty, PaneIdentity::Native(2)).unwrap();
+        assert_eq!(tree.drag_terminal_space(), Some(empty));
+        let other_empty = tree.alloc_id();
+        let state = cx.new(|_| gpui_component::resizable::ResizableState::default());
+        tree.split(
+            empty,
+            SplitDir::Down,
+            SpaceLeaf {
+                id: other_empty,
+                content: SpaceContent::Empty,
+                focus: focus.clone(),
+            },
+            state,
+        );
+        assert_eq!(
+            tree.drag_terminal_space(),
+            None,
+            "never guess among inactive sessions"
+        );
+        tree.set_active(original);
+        assert_eq!(tree.drag_terminal_space(), Some(original));
+        tree.take_leaf_terminal(original);
+        tree.take_leaf_terminal(empty);
+        assert_eq!(tree.drag_terminal_space(), None);
+    });
+}
+
+#[gpui::test]
+fn tagged_panes_split_move_and_close_preserve_ownership(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+        let focus = cx.focus_handle();
+        let mut tree = super::SpaceTree::new_terminal(PaneIdentity::Native(7), focus.clone());
+        let original = tree.active();
+        let sibling = tree.alloc_id();
+        let state = cx.new(|_| gpui_component::resizable::ResizableState::default());
+        tree.split(
+            original,
+            SplitDir::Right,
+            SpaceLeaf {
+                id: sibling,
+                content: SpaceContent::Empty,
+                focus: focus.clone(),
+            },
+            state,
+        );
+        let moved = tree.take_leaf_terminal(original).unwrap();
+        assert_eq!(moved, PaneIdentity::Native(7));
+        assert!(tree.fill_empty(sibling, moved).is_ok());
+        assert!(tree.fill_empty(original, PaneIdentity::Legacy(9)).is_ok());
+        assert_eq!(
+            tree.terminal_views(),
+            vec![PaneIdentity::Legacy(9), PaneIdentity::Native(7)]
+        );
+        let (outcome, removed) = tree.close(original);
+        assert_eq!(outcome, CloseOutcome::Removed);
+        assert_eq!(removed, Some(PaneIdentity::Legacy(9)));
+        assert!(tree.is_single());
+        assert_eq!(tree.active(), sibling);
+        assert_eq!(tree.active_terminal(), Some(PaneIdentity::Native(7)));
+        assert_eq!(tree.close(sibling), (CloseOutcome::LastSpaceClosed, None));
+        assert_eq!(
+            tree.take_leaf_terminal(sibling),
+            Some(PaneIdentity::Native(7))
+        );
+        assert!(tree.has_no_terminals());
+    });
+}
+
+#[gpui::test]
+fn failed_tagged_placement_returns_exact_handle(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+        let mut tree = super::SpaceTree::new_terminal(PaneIdentity::Native(1), cx.focus_handle());
+        assert_eq!(
+            tree.fill_empty(tree.active(), PaneIdentity::Native(2)),
+            Err(PaneIdentity::Native(2))
+        );
+        assert_eq!(
+            tree.fill_empty(SpaceId(999), PaneIdentity::Native(3)),
+            Err(PaneIdentity::Native(3))
+        );
+        assert_eq!(tree.terminal_views(), vec![PaneIdentity::Native(1)]);
+    });
+}
+
+#[gpui::test]
+fn tagged_focus_resolver_runs_only_for_terminal_leaf(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+        let focus = cx.focus_handle();
+        let mut tree = super::SpaceTree::new_terminal(PaneIdentity::Native(4), focus.clone());
+        assert_eq!(
+            tree.active_focus_handle(|pane| {
+                assert_eq!(*pane, PaneIdentity::Native(4));
+                focus.clone()
+            }),
+            Some(focus.clone())
+        );
+        tree.take_leaf_terminal(tree.active());
+        assert_eq!(
+            tree.active_focus_handle(|_| panic!("empty leaf must use placeholder focus")),
+            Some(focus)
+        );
+    });
+}
 
 /// Helper: build a `SpaceLeaf` with `Empty` content and a dummy focus handle.
 fn empty_leaf(id: u64, focus: FocusHandle) -> SpaceLeaf {
@@ -246,13 +379,12 @@ fn close_nested_collapses_correctly(cx: &mut gpui::TestAppContext) {
 fn fill_empty_replaces_content(cx: &mut gpui::TestAppContext) {
     cx.update(|cx| {
         let focus = cx.focus_handle();
-        let tree = SpaceTree::new_empty(focus);
+        let mut tree = super::SpaceTree::<PaneIdentity>::new_empty(focus);
         let leaf_id = tree.active();
 
-        // fill_empty requires an Entity<TerminalView>, which needs a full
-        // session. We test the no-op path: fill a nonexistent leaf.
-        // (Full fill test is in panel/tests.rs.)
-        let _ = leaf_id;
+        assert!(tree.fill_empty(leaf_id, PaneIdentity::Native(5)).is_ok());
+        assert_eq!(tree.active_terminal(), Some(PaneIdentity::Native(5)));
+        assert!(tree.empty_space_destinations().is_empty());
     });
 }
 

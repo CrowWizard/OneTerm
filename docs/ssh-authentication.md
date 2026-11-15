@@ -6,6 +6,11 @@ OneTerm supports password/no-password, private-key, and SSH agent authentication
 
 ## User Flows
 
+US-0259 (2026-11-15): confirmed administrators may save/update credentials and
+manage the encrypted master-password vault through ordinary flows. Unknown tokens
+remain restricted. Host-key approval, sealed-password address binding, vault
+integrity checks, lock/unlock and destructive reset confirmation are unchanged.
+
 Both saved-session Connect and Quick Connect provide an authentication-method choice:
 
 - **Password** shows an optional masked password field. An empty password requests SSH `none` authentication, preserving existing behavior. When the server rejects `password` but advertises `keyboard-interactive` (typical for `PasswordAuthentication no` + `KbdInteractiveAuthentication yes` PAM setups), the backend transparently retries with keyboard-interactive and answers the prompts with the same password. Only a single round is supported: every prompt of the first info request is answered with the password; a prompt that echoes its input (so it is not a password prompt) or a second round of prompts aborts with an explicit error instead of guessing.

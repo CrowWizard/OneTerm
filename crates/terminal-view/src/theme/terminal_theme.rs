@@ -80,7 +80,7 @@ pub(crate) fn build_terminal_theme(theme: &Theme) -> TerminalTheme {
         foreground: palette::rgb_from_rgba(c.foreground.to_rgb()),
         background: palette::rgb_from_rgba(c.background.to_rgb()),
         cursor: palette::rgb_from_rgba(cursor_rgba),
-        ansi: palette::ANSI_16,
+        ansi: palette::ansi_from_theme(theme),
         indexed: [None; 256],
     };
     TerminalTheme {

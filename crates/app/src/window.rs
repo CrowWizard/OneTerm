@@ -21,6 +21,20 @@ pub(crate) fn open_window(
     pending_crash_reports: Vec<crate::crash_report::PendingCrashReport>,
     cx: &mut App,
 ) -> Task<anyhow::Result<WindowHandle<Root>>> {
+    open_window_with_effects(pending_crash_reports, StartupEffects::Production, cx)
+}
+
+pub(crate) enum StartupEffects {
+    Production,
+    #[cfg(feature = "native-desktop")]
+    NativeTest,
+}
+
+pub(crate) fn open_window_with_effects(
+    pending_crash_reports: Vec<crate::crash_report::PendingCrashReport>,
+    effects: StartupEffects,
+    cx: &mut App,
+) -> Task<anyhow::Result<WindowHandle<Root>>> {
     let mut window_size = size(px(1600.0), px(1000.0));
     if let Some(display) = cx.primary_display() {
         let display_size = display.bounds().size;
@@ -56,15 +70,16 @@ pub(crate) fn open_window(
             .update(cx, |_, window, cx| {
                 window.activate_window();
                 let elevated = oneterm_core::elevation::is_restricted();
-                if !elevated {
-                    // M2: an elevated updater can write `C:\Program Files` and
-                    // leave files the ordinary instance cannot replace, which
-                    // would silently change the install for the normal window
-                    // too. So the elevated instance never checks at all.
+                if !elevated && matches!(effects, StartupEffects::Production) {
+                    // The Root is held by this update; defer dialogs until its
+                    // notification and dialog hosts can be borrowed normally.
+                    if pending_crash_reports.is_empty() {
+                        window.defer(cx, oneterm_session_ui::connect_startup_session);
+                    }
+                    // US-0259: confirmed administrators share production startup
+                    // effects. The isolated native entry still suppresses them.
                     start_auto_check(window, cx);
-                    // M7: the reports were still loaded, promoted and pruned —
-                    // only the GitHub-draft dialog is suppressed, so an elevated
-                    // window is not a route to a browser and a prefilled issue.
+                    // Crash files remain separated by real token identity.
                     show_crash_reports(
                         pending_crash_reports,
                         crate::crash_report::delete_pending_report,
@@ -74,9 +89,13 @@ pub(crate) fn open_window(
                 }
                 // M5: the marker is in the OS title, so the taskbar, Alt-Tab and
                 // every screenshot carry it.
-                window.set_window_title(oneterm_core::elevation::window_title(
-                    oneterm_core::elevation::elevation(),
-                ));
+                match effects {
+                    StartupEffects::Production => window.set_window_title(oneterm_core::elevation::window_title(
+                        oneterm_core::elevation::elevation(),
+                    )),
+                    #[cfg(feature = "native-desktop")]
+                    StartupEffects::NativeTest => window.set_window_title("OneTerm Native Workspace (test)"),
+                }
                 // Over-the-shoulder elevation puts this process in another
                 // account's profile, so it has none of the user's settings. Say
                 // so once; the marker is still correct, because it comes from

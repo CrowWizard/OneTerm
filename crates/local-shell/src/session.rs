@@ -6,7 +6,7 @@
 //! `LocalSession` as its `PtyOwner` — that half lives in `session_terminal.rs`.
 //! See `docs/terminal-backend.md` §6.2.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use oneterm_vt::pty::{Options, Shell, WindowSize};
@@ -41,33 +41,8 @@ impl LocalSession {
         security: TerminalSecurityPolicy,
         logging: TerminalLogConfig,
     ) -> Result<PtySession<Self>, AppError> {
-        let resolved = resolve_shell(&cfg)?;
-        // Kept for the spawn-failure error and logging identity: `resolved` is moved into `Options`.
-        let program = resolved.program.clone();
-        let program_display = resolved.program.display().to_string();
-        let opts = Options {
-            shell: Some(Shell::new(
-                program_argument(&resolved.program),
-                resolved.args,
-            )),
-            // From `resolved`, never from `cfg`: `resolve_shell` is where the
-            // elevation guard lives, and a spawner that read one more field off
-            // the original config would walk straight around it (`IN-0043`).
-            working_directory: resolved.cwd.or_else(home_dir),
-            env: resolved.env,
-            // The engine measures cluster widths with `wcswidth`, so the console
-            // host is asked for the same rule.
-            glyph_width: oneterm_vt::pty::GlyphWidth::WcsWidth,
-            #[cfg(unix)]
-            child_signal_mask: None,
-            // Escape every argument with the C-runtime rules so user-supplied
-            // `Custom` args and the PowerShell `-Command` payload survive
-            // `CreateProcessW` command-line re-parsing. The default `cmd /K chcp
-            // 65001 >nul` tokens contain no whitespace or quotes, so escaping
-            // leaves them verbatim for cmd.exe's own (non-CRT) `/K` parsing.
-            #[cfg(windows)]
-            escape_args: true,
-        };
+        let (opts, program) = resolved_options(&cfg)?;
+        let program_display = program.display().to_string();
         let winsize = WindowSize {
             rows: initial.rows,
             cols: initial.cols,
@@ -148,6 +123,28 @@ impl LocalSession {
         }
         result
     }
+}
+
+/// One guarded resolution path for shipping and explicit native sessions.
+/// Read only resolved fields: resolve_shell owns the elevation boundary.
+pub(crate) fn resolved_options(cfg: &LocalShellConfig) -> Result<(Options, PathBuf), AppError> {
+    let resolved = resolve_shell(cfg)?;
+    let program = resolved.program.clone();
+    let opts = Options {
+        shell: Some(Shell::new(
+            program_argument(&resolved.program),
+            resolved.args,
+        )),
+        working_directory: resolved.cwd.or_else(home_dir),
+        env: resolved.env,
+        glyph_width: oneterm_vt::pty::GlyphWidth::WcsWidth,
+        #[cfg(unix)]
+        child_signal_mask: None,
+        // Apply CRT escaping to arguments as well as program quoting above.
+        #[cfg(windows)]
+        escape_args: true,
+    };
+    Ok((opts, program))
 }
 
 /// Join the PTY owner thread off the caller's thread and log a panic.

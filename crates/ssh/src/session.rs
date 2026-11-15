@@ -107,18 +107,18 @@ impl Drop for SshSession {
     }
 }
 
-const CONNECT_DEADLINE: Duration = Duration::from_secs(60);
+pub(crate) const CONNECT_DEADLINE: Duration = Duration::from_secs(60);
 const PHASE_DEADLINE: Duration = Duration::from_secs(20);
 // Transport-level keepalive detects a dead peer or a NAT that dropped the mapping
 // instead of leaving the tab hanging forever. Its policy is captured per connection.
 // Disable TTY echo while shell integration bootstraps the running shell.
-const SHELL_INTEGRATION_PTY_MODES: &[(Pty, u32)] = &[(Pty::ECHO, 0)];
+pub(crate) const SHELL_INTEGRATION_PTY_MODES: &[(Pty, u32)] = &[(Pty::ECHO, 0)];
 
 const SSH_RUNTIME_WORKERS: usize = 2;
 static SSH_RUNTIME: OnceLock<std::result::Result<tokio::runtime::Runtime, String>> =
     OnceLock::new();
 
-fn shared_runtime() -> oneterm_core::Result<&'static tokio::runtime::Runtime> {
+pub(crate) fn shared_runtime() -> oneterm_core::Result<&'static tokio::runtime::Runtime> {
     match SSH_RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(SSH_RUNTIME_WORKERS)
@@ -152,7 +152,7 @@ pub(crate) struct ConnectPhases {
 }
 
 impl ConnectPhases {
-    fn new(cancellation: ConnectionCancellation) -> Self {
+    pub(crate) fn new(cancellation: ConnectionCancellation) -> Self {
         Self {
             cancellation,
             current: Cell::new(ConnectPhase::Transport),
@@ -160,7 +160,7 @@ impl ConnectPhases {
     }
 
     /// The phase most recently started.
-    fn current(&self) -> ConnectPhase {
+    pub(crate) fn current(&self) -> ConnectPhase {
         self.current.get()
     }
 
@@ -411,6 +411,7 @@ pub fn connect(
             let (open_tx, open_rx) = tokio::sync::mpsc::channel(HANDLE_REQUEST_CAPACITY);
             if !cfg.port_forwards.is_empty() {
                 let context = ForwardContext {
+                    tasks: tokio_util::task::TaskTracker::new(),
                     open_tx,
                     shutdown: session_shutdown.clone(),
                     notify: notify_tx,
@@ -696,7 +697,7 @@ const REMOTE_SHELL_ENV: [(&str, &str); 3] = [
 /// Send [`REMOTE_SHELL_ENV`] on the shell channel. Failures surface as
 /// `PtyRequest` connect errors — with `want_reply = false` this only happens
 /// if the channel/connection is already gone.
-async fn request_remote_shell_env(
+pub(crate) async fn request_remote_shell_env(
     channel: &russh::Channel<russh::client::Msg>,
 ) -> Result<(), AppError> {
     for (name, value) in REMOTE_SHELL_ENV {
@@ -750,7 +751,7 @@ async fn request_remote_shell_env(
 const SHELL_INTEGRATION_BOOTSTRAP: &str = r#"export COLORTERM=truecolor; __oneterm_mark() { printf '\033]133;%s\033\\' "$1"; }; __oneterm_precmd() { __oneterm_status=$?; if [ -n "${__oneterm_seen-}" ]; then __oneterm_mark "D;$__oneterm_status"; fi; __oneterm_seen=1; printf '\033]7;file://%s%s\033\\' "${HOSTNAME:-$(hostname)}" "$PWD"; __oneterm_mark A; return $__oneterm_status; }; __oneterm_preexec() { __oneterm_mark C; }; if [ -n "${ZSH_VERSION-}" ]; then eval 'precmd_functions=(__oneterm_precmd $precmd_functions); preexec_functions=($preexec_functions __oneterm_preexec)'; PS1="$PS1%{$(__oneterm_mark B)%}"; elif [ -n "${BASH_VERSION-}" ]; then case ";${PROMPT_COMMAND:-};" in *";__oneterm_precmd;"*) ;; *) PROMPT_COMMAND="__oneterm_precmd${PROMPT_COMMAND:+;$PROMPT_COMMAND}" ;; esac; PS0="$(__oneterm_mark C)"; PS1="$PS1$(printf '\001\033]133;B\007\002')"; fi; __oneterm_precmd; __oneterm_seen=; stty echo 2>/dev/null"#;
 
 /// Send the shell-integration bootstrap after the shell is open.
-async fn send_shell_integration_bootstrap(
+pub(crate) async fn send_shell_integration_bootstrap(
     channel: &russh::Channel<russh::client::Msg>,
     state: &SharedState,
 ) -> oneterm_core::Result<()> {

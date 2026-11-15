@@ -13,17 +13,21 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::time::{Duration, Instant};
 
 use oneterm_terminal::TerminalRender;
-use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0};
+use windows_sys::Win32::Foundation::{
+    ERROR_BROKEN_PIPE, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+};
 use windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
+use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows_sys::Win32::System::Threading::{
     GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
-    TerminateProcess, WaitForSingleObject,
+    QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject,
 };
 
-use super::session_tests::{lock_spawns, spawn_unguarded, wait_until};
+use super::session_tests::{spawn_unguarded, wait_until};
+use crate::spawn_guard::lock_spawns;
 
 /// The exit codes a watched process is allowed to end with.
 ///
@@ -32,9 +36,43 @@ use super::session_tests::{lock_spawns, spawn_unguarded, wait_until};
 /// `0x1` is OneTerm's own `TerminateProcess(handle, 1)` — the `DEC-0016`
 /// escalation, and the only code that proves the escalation ran. `0xc0000142`
 /// is `STATUS_DLL_INIT_FAILED`, the fault a client can take when its console
-/// disappears mid-start. Anything else means the shell died of something this
-/// packet did not measure.
+/// disappears mid-start. Other shell codes remain failures. A verified legacy
+/// system console host additionally permits broken pipe in `expected_exit`;
+/// see the retained Windows 20348 investigation for that measured close path.
 const EXPECTED_EXIT_CODES: [u32; 4] = [0x0, 0x1, 0xc000_013a, 0xc000_0142];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProcessRole {
+    SystemConsoleHost,
+    Other,
+}
+
+fn process_role(image: &str, system_directory: &str) -> ProcessRole {
+    let host = format!("{}\\conhost.exe", system_directory.trim_end_matches('\\'));
+    if image.eq_ignore_ascii_case(&host) {
+        ProcessRole::SystemConsoleHost
+    } else {
+        ProcessRole::Other
+    }
+}
+
+fn expected_exit(role: ProcessRole, code: u32) -> bool {
+    EXPECTED_EXIT_CODES.contains(&code)
+        // Legacy system ConPTY explicitly exits with broken pipe on close.
+        || (role == ProcessRole::SystemConsoleHost && code == ERROR_BROKEN_PIPE)
+}
+
+fn system_directory() -> String {
+    let mut buffer = vec![0u16; 32768];
+    // SAFETY: buffer is writable for the supplied capacity.
+    let length = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) } as usize;
+    assert!(
+        length > 0 && length < buffer.len(),
+        "query system directory: {}",
+        std::io::Error::last_os_error()
+    );
+    String::from_utf16(&buffer[..length]).expect("system directory UTF-16")
+}
 
 /// How long a survivor is given before it counts as an orphan.
 const LIVENESS_BOUND: Duration = Duration::from_secs(5);
@@ -65,6 +103,7 @@ struct Watched {
     pid: u32,
     name: String,
     handle: OwnedHandle,
+    role: ProcessRole,
 }
 
 impl Watched {
@@ -125,7 +164,7 @@ fn children_of(parent: u32) -> Vec<(u32, String)> {
     found
 }
 
-fn watch(pid: u32, name: String) -> Option<Watched> {
+fn watch(pid: u32, name: String, system_directory: &str) -> Option<Watched> {
     // SAFETY: `pid` came from a snapshot; a failed open returns null.
     let handle = unsafe {
         OpenProcess(
@@ -139,7 +178,31 @@ fn watch(pid: u32, name: String) -> Option<Watched> {
     }
     // SAFETY: `OpenProcess` succeeded, so the handle is owned here.
     let handle = unsafe { OwnedHandle::from_raw_handle(handle as _) };
-    Some(Watched { pid, name, handle })
+    let mut image = vec![0u16; 32768];
+    let mut length = image.len() as u32;
+    // SAFETY: the query-capable handle is live; image and length are writable.
+    let queried = unsafe {
+        QueryFullProcessImageNameW(
+            handle.as_raw_handle() as HANDLE,
+            0,
+            image.as_mut_ptr(),
+            &mut length,
+        )
+    };
+    assert_ne!(
+        queried,
+        0,
+        "query image for {name} (pid {pid}): {}",
+        std::io::Error::last_os_error()
+    );
+    let image = String::from_utf16(&image[..length as usize]).expect("process image UTF-16");
+    let role = process_role(&image, system_directory);
+    Some(Watched {
+        pid,
+        name,
+        handle,
+        role,
+    })
 }
 
 /// One row of the liveness table.
@@ -149,6 +212,7 @@ struct Row {
     exited_after: Option<Duration>,
     exit_code: Option<u32>,
     terminated: bool,
+    role: ProcessRole,
 }
 
 /// Spawn a default session, drop it after `delay`, and measure what survives.
@@ -157,14 +221,15 @@ fn probe(delay: DropAfter) -> Vec<Row> {
 
     // Held across both snapshots: a sibling test's shell starting in between
     // would be adopted here, waited out and terminated. Every spawn in this
-    // binary takes the same lock (see `session_tests::SPAWN_GUARD`).
+    // binary takes the same lock (see `crate::spawn_guard`).
     let guard = lock_spawns();
+    let system_directory = system_directory();
     let before: Vec<u32> = children_of(ours).into_iter().map(|(pid, _)| pid).collect();
     let session = spawn_unguarded(oneterm_core::LocalShellConfig::default()).expect("spawn");
     let watched: Vec<Watched> = children_of(ours)
         .into_iter()
         .filter(|(pid, _)| !before.contains(pid))
-        .filter_map(|(pid, name)| watch(pid, name))
+        .filter_map(|(pid, name)| watch(pid, name, &system_directory))
         .collect();
     drop(guard);
 
@@ -193,6 +258,7 @@ fn probe(delay: DropAfter) -> Vec<Row> {
             exited_after: None,
             exit_code: None,
             terminated: false,
+            role: process.role,
         })
         .collect();
 
@@ -249,12 +315,38 @@ fn assert_no_orphan(delay: DropAfter, runs: usize) {
                 .exit_code
                 .expect("an exited process must have an exit code");
             assert!(
-                EXPECTED_EXIT_CODES.contains(&code),
-                "run {run}: {} (pid {}) exited with an unexpected {code:#x} after a drop at {}",
+                expected_exit(row.role, code),
+                "run {run}: {} (pid {}, role {:?}) exited with an unexpected {code:#x} after a drop at {}",
                 row.name,
                 row.pid,
+                row.role,
                 delay.label(),
             );
+        }
+    }
+}
+
+#[test]
+fn broken_pipe_is_only_accepted_for_the_verified_system_host() {
+    let system = r"C:\Windows\System32";
+    let host = process_role(r"c:\WINDOWS\system32\CONHOST.EXE", system);
+    assert_eq!(host, ProcessRole::SystemConsoleHost);
+    assert!(expected_exit(host, ERROR_BROKEN_PIPE));
+    assert!(!expected_exit(host, 0xdead_beef));
+    for image in [
+        r"C:\Windows\System32\cmd.exe",
+        r"D:\foreign\conhost.exe",
+        "",
+        r"C:\Windows\System32\conhost.exe.other",
+    ] {
+        let role = process_role(image, system);
+        assert_eq!(role, ProcessRole::Other, "{image}");
+        assert!(!expected_exit(role, ERROR_BROKEN_PIPE), "{image}");
+        assert!(!expected_exit(role, 0xdead_beef), "{image}");
+    }
+    for role in [ProcessRole::SystemConsoleHost, ProcessRole::Other] {
+        for code in EXPECTED_EXIT_CODES {
+            assert!(expected_exit(role, code));
         }
     }
 }

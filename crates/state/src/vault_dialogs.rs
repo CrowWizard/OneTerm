@@ -39,7 +39,7 @@ use crate::vault_state::{
 };
 
 /// Why an elevated window offers no set-up, change or reset (`DEC-0019` M4).
-pub const READ_ONLY_NOTE: &str = "Managed from the normal OneTerm window.";
+pub const READ_ONLY_NOTE: &str = "Unavailable while the process token cannot be verified.";
 
 /// What the Reset dialog asks the user to type.
 pub const RESET_CONFIRMATION: &str = "RESET";

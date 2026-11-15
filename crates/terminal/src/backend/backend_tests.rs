@@ -29,6 +29,43 @@ use super::*;
 
 type Router = OscRouter<FakePtyTransport>;
 
+#[cfg(feature = "ghostty-native")]
+#[test]
+fn native_clipboard_uses_shared_origin_policy() {
+    use crate::ghostty::events::Event;
+    for origin in [ClipboardOrigin::Local, ClipboardOrigin::Remote] {
+        for enabled in [false, true] {
+            let f = fixture(origin, 8);
+            let router = OscRouter::with_security(
+                f.transport,
+                SessionEventSink::new(f.events_tx),
+                f.state.clone(),
+                origin,
+                crate::TerminalSecurityPolicy {
+                    allow_remote_clipboard_read: enabled,
+                    allow_remote_clipboard_write: enabled,
+                },
+            );
+            let mut events = Vec::new();
+            router.route_ghostty(Event::Clipboard("secret".into()), &mut events);
+            router.route_ghostty(Event::ClipboardRead, &mut events);
+            if origin == ClipboardOrigin::Local || enabled {
+                assert_eq!(
+                    events,
+                    [
+                        SessionEvent::Clipboard(Some("secret".into())),
+                        SessionEvent::ClipboardRead
+                    ]
+                );
+                assert_eq!(f.state.clipboard().as_deref(), Some("secret"));
+            } else {
+                assert!(events.is_empty());
+                assert!(f.state.clipboard().is_none());
+            }
+        }
+    }
+}
+
 struct Fixture {
     router: Router,
     transport: FakePtyTransport,

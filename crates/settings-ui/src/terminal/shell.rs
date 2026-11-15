@@ -33,7 +33,9 @@ fn shell_label(kind: ShellKind) -> SharedString {
 }
 
 /// Build the "Shell" settings group.
-pub(super) fn group() -> SettingGroup {
+pub(super) fn group(cx: &App) -> SettingGroup {
+    let kind = TerminalSettings::global(cx).read(cx).shell.kind;
+    let (program_label, program_help) = program_field_text(kind);
     let options: Vec<(SharedString, SharedString)> = SHELL_KINDS
         .iter()
         .map(|kind| (shell_label(*kind), shell_label(*kind)))
@@ -62,7 +64,7 @@ pub(super) fn group() -> SettingGroup {
                 )),
             ),
             SettingItem::new(
-                "Custom Program",
+                program_label,
                 SettingField::input(
                     |cx: &App| {
                         TerminalSettings::global(cx)
@@ -79,6 +81,35 @@ pub(super) fn group() -> SettingGroup {
                 )
                 .default_value(SharedString::default()),
             )
-            .description("Path to the shell executable. Custom only."),
+            .description(program_help),
         ])
+}
+
+fn program_field_text(kind: ShellKind) -> (&'static str, &'static str) {
+    if kind == ShellKind::Pwsh {
+        (
+            "Startup Executable",
+            "Path to pwsh.exe (no arguments or enclosing quotes). Leave empty to auto-detect. Administrator windows use trusted install paths instead.",
+        )
+    } else {
+        (
+            "Custom Program",
+            "Path to the shell executable. Custom only.",
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pwsh_executable_input_explains_auto_detection_and_privilege_boundary() {
+        let (label, help) = program_field_text(ShellKind::Pwsh);
+        assert_eq!(label, "Startup Executable");
+        assert!(help.contains("pwsh.exe"));
+        assert!(help.contains("auto-detect"));
+        assert!(help.contains("Administrator"));
+        assert_eq!(program_field_text(ShellKind::Custom).0, "Custom Program");
+    }
 }

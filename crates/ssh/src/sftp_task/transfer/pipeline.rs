@@ -86,10 +86,11 @@ where
             }
             return Ok(());
         }
-        writer
-            .write_all(&buffer[..read])
-            .await
-            .map_err(|e| AppError::msg(format!("write: {e}")))?;
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(AppError::Cancelled),
+            written = writer.write_all(&buffer[..read]) => written.map_err(|e| AppError::msg(format!("write: {e}")))?,
+        }
         copied += read as u64;
         if copied - reported >= CHUNK_LEN as u64 {
             reported = copied;
@@ -264,6 +265,28 @@ mod tests {
 
         assert!(matches!(result, Err(AppError::Cancelled)));
         assert!(sink.is_empty(), "a cancelled copy writes nothing");
+    }
+
+    #[tokio::test]
+    async fn cancellation_interrupts_a_blocked_write() {
+        let cancel = CancellationToken::new();
+        let (mut writer, _reader) = tokio::io::duplex(1);
+        let mut source = Cursor::new(payload(CHUNK_LEN));
+        let mut progress = |_| {};
+        let copy = copy_sequential(&mut source, &mut writer, &cancel, &mut progress);
+        tokio::pin!(copy);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut copy)
+                .await
+                .is_err()
+        );
+        cancel.cancel();
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), copy)
+                .await
+                .unwrap(),
+            Err(AppError::Cancelled)
+        ));
     }
 }
 

@@ -23,6 +23,10 @@
 
 mod byte_budget;
 mod event_sink;
+#[cfg(feature = "ghostty-native")]
+mod ghostty_async_pump;
+#[cfg(feature = "ghostty-native")]
+mod ghostty_pump;
 mod osc_router;
 mod pump;
 mod state;
@@ -30,6 +34,12 @@ mod transport;
 
 pub use byte_budget::ByteBudget;
 pub use event_sink::{EventQueueDiagnostics, SessionEventSink};
+#[cfg(feature = "ghostty-native")]
+#[doc(hidden)]
+pub use ghostty_async_pump::{AsyncGhosttyPump, Error as AsyncGhosttyPumpError};
+#[cfg(feature = "ghostty-native")]
+#[doc(hidden)]
+pub use ghostty_pump::{Error as GhosttyPumpError, GhosttyPump};
 pub use osc_router::OscRouter;
 pub use pump::{GridSize, TerminalPump};
 pub use state::{DefaultColors, SessionState, SharedSessionState, SharedState};

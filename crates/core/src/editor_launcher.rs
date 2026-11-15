@@ -54,6 +54,21 @@ fn editor_args(args: &[String], path: &Path) -> Vec<OsString> {
 /// editor keeps running independently of the caller. A `Custom` choice with a
 /// blank program falls back to the OS default.
 pub fn launch_editor(choice: &EditorChoice, path: &Path) -> Result<()> {
+    launch_editor_with_restriction(choice, path, crate::elevation::is_restricted())
+}
+
+fn launch_editor_with_restriction(
+    choice: &EditorChoice,
+    path: &Path,
+    restricted: bool,
+) -> Result<()> {
+    // US-0259 permits configured editors for confirmed administrators; an
+    // unknown token still cannot launch commands or file associations.
+    if restricted {
+        return Err(AppError::msg(
+            "Editor launch requires a verified process token.",
+        ));
+    }
     match choice.custom_program() {
         Some((program, args)) => spawn_custom(program, args, path),
         None => open_with_os_default(path),
@@ -81,6 +96,21 @@ fn open_with_os_default(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn restricted_editor_launch_refuses_custom_commands_and_file_associations() {
+        for choice in [
+            EditorChoice::OsDefault,
+            EditorChoice::Custom {
+                program: "must-not-run".into(),
+                args: vec![],
+            },
+        ] {
+            let error = launch_editor_with_restriction(&choice, Path::new("unused"), true)
+                .expect_err("no editor can be launched under a restricted token");
+            assert!(error.to_string().contains("verified process token"));
+        }
+    }
 
     #[test]
     fn blank_custom_program_falls_back_to_os_default() {

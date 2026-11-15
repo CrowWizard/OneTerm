@@ -9,6 +9,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [features]
+ghostty-native = ["oneterm-terminal/ghostty-native"]
 terminal-diagnostics = []
 # Function-level profiling sites (IN-0046). Off by default: without it every
 # `#[cfg_attr(feature = "hotpath-profiling", hotpath::measure)]` vanishes and
@@ -35,4 +36,4 @@ oneterm-terminal = { workspace = true, features = ["test-support"] }
 # Test-only: the BUG-0055 orphan probe watches the processes a spawn added as
 # children of the test process (ToolHelp snapshot + process handle liveness).
 [target.'cfg(windows)'.dev-dependencies]
-windows-sys.workspace = true
+windows-sys = { workspace = true, features = ["Win32_System_SystemInformation"] }

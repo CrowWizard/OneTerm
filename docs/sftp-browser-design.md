@@ -1,5 +1,15 @@
 # SFTP Browser — Integration design
 
+Native workspace extension (US-0252): the isolated native direct-SSH entry
+reuses this backend and browser on the authenticated shell connection. The
+active native Space publishes its SFTP backend and live OSC cwd; local/empty
+Spaces clear them. Native setup/lookup can be cancelled; its owner observes
+request tasks, non-aborted transfer cleanup and split transport destruction
+even when the browser retains a backend Arc. Legacy five-second drain remains
+unchanged. Disconnected upload cleanup can leave a named remote temporary
+sibling and logs that failure; it does not overwrite the original target or
+report success. Physical external-server browser/transfer UAT remains open.
+
 > **Status:** Historical design record. For current crate ownership and paths, see [`docs/architecture.md`](architecture.md).
 
 > Design document for the SFTP browser feature: browse files, upload/download,
@@ -23,6 +33,14 @@
 ---
 
 ## 1. Overview & goals
+
+### Administrator windows
+
+Confirmed administrator windows may use the SSH Client dock and SFTP file
+operations (`US-0206`; DEC-0019 amendment 2026-11-10). Saved-session management
+and configuration remain read-only. **Edit** reports that the normal OneTerm
+window must be used: neither configured editor commands nor OS file associations
+are launched under the restricted token. Ordinary-window editing is unchanged.
 
 ### 1.1. Feature description
 

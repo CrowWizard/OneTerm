@@ -17,6 +17,15 @@ mod scrollbar;
 mod search;
 mod view;
 
+#[cfg(feature = "ghostty-native")]
+pub(crate) use render::cursor_shape_from_setting;
+#[cfg(feature = "ghostty-native")]
+pub(crate) use render::shell_kind_to_profile;
+#[cfg(feature = "ghostty-native")]
+pub(crate) use render::terminal_font;
+#[cfg(feature = "ghostty-native")]
+pub(crate) use render::{OverlayColors, bell_badge, progress_overlay};
+
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]

@@ -24,7 +24,152 @@ use crate::space::{CloseOutcome, SplitDir};
 use crate::terminal_view::TerminalView;
 
 mod collapsed_cell;
+#[cfg(feature = "ghostty-native")]
+mod native_drag;
+#[cfg(feature = "ghostty-native")]
+mod native_duplicate;
+#[cfg(feature = "ghostty-native")]
+mod native_sftp;
+mod ssh_context_menu;
 mod tab_menu_and_card;
+
+#[cfg(feature = "ghostty-native")]
+#[gpui::test]
+fn native_pane_uses_real_panel_split_move_metrics_and_close(cx: &mut TestAppContext) {
+    use super::pane::TerminalPane;
+    use std::time::{Duration, Instant};
+    cx.executor().allow_parking();
+    cx.update(gpui_component::init);
+    cx.update(oneterm_settings::TerminalSettings::init);
+    let (session, events) =
+        crate::native_surface::tests::native_pane_content_fixture(b"native select all");
+    let model = session.render_model();
+    let (panel, cx) = cx.add_window_view(move |window, cx| {
+        TerminalPanel::from_spec(
+            PanelSpec::NativeSession {
+                session,
+                title: "Native".into(),
+                duplicate_config: None,
+            },
+            window,
+            cx,
+        )
+    });
+    let pane = panel.read_with(cx, |panel, _| panel.tree.active_terminal().unwrap());
+    let TerminalPane::Native(native) = pane else {
+        panic!("no legacy view may be constructed")
+    };
+    let observation = native.read_with(cx, |pane, _| pane.completion());
+    panel.update_in(cx, |panel, window, cx| {
+        panel.edit_active(crate::input::edit::select_all, window, cx);
+    });
+    let selection_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        cx.run_until_parked();
+        if crate::native_surface::tests::complete(model.selection_text())
+            .unwrap()
+            .is_some()
+        {
+            break;
+        }
+        assert!(Instant::now() < selection_deadline);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        crate::native_surface::tests::complete(model.selection_text())
+            .unwrap()
+            .as_deref(),
+        Some("native select all")
+    );
+    // A native selection exists before its publication acknowledgment completes.
+    while native.read_with(cx, |pane, cx| pane.edit_pending(cx)) {
+        cx.run_until_parked();
+        assert!(Instant::now() < selection_deadline);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    panel.update_in(cx, |panel, window, cx| {
+        panel.edit_active(crate::input::edit::copy_selection, window, cx);
+    });
+    loop {
+        cx.run_until_parked();
+        if cx
+            .update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+            .as_deref()
+            == Some("native select all")
+        {
+            break;
+        }
+        assert!(Instant::now() < selection_deadline);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    while native.read_with(cx, |pane, cx| pane.edit_pending(cx)) {
+        cx.run_until_parked();
+        assert!(Instant::now() < selection_deadline);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    panel.update_in(cx, |panel, window, cx| {
+        panel.edit_active(crate::input::edit::clear_screen, window, cx);
+    });
+    while native.read_with(cx, |pane, cx| pane.edit_pending(cx)) {
+        cx.run_until_parked();
+        assert!(Instant::now() < selection_deadline);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        crate::native_surface::tests::complete(model.selection_text()).unwrap(),
+        None
+    );
+    events
+        .send_blocking(oneterm_terminal::SessionEvent::Title("Native title".into()))
+        .unwrap();
+    events
+        .send_blocking(oneterm_terminal::SessionEvent::Cwd(
+            std::path::PathBuf::from("native-cwd"),
+        ))
+        .unwrap();
+    drop(events);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while panel
+        .read_with(cx, |panel, cx| panel.breadcrumb_label(cx))
+        .is_none()
+    {
+        cx.executor().advance_clock(Duration::from_millis(20));
+        cx.run_until_parked();
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    panel.update_in(cx, |panel, window, cx| {
+        assert!(panel.active_view().is_none());
+        assert_eq!(panel.breadcrumb_label(cx).as_deref(), Some("native-cwd"));
+        assert_eq!(
+            panel.local_cwd(cx),
+            Some(std::path::PathBuf::from("native-cwd"))
+        );
+        assert_eq!(
+            panel.tree.active_terminal().unwrap().title(cx).as_deref(),
+            Some("Native title")
+        );
+        let original = panel.tree.active();
+        let identity = panel.tree.active_terminal().unwrap().id();
+        panel.split_active_at(original, SplitDir::Right, window, cx);
+        let destination = panel.tree.active();
+        let moved = panel.tree.take_leaf_terminal(original).unwrap();
+        panel.place_view(destination, moved, window, cx).unwrap();
+        assert_eq!(panel.tree.active_terminal().unwrap().id(), identity);
+        panel.close_space(original, window, cx);
+        assert_eq!(panel.leaf_count(), 1);
+        assert_eq!(panel.tree.active_terminal().unwrap().id(), identity);
+        panel.shutdown(window, cx);
+    });
+    drop(native);
+    while observation.result().is_none() {
+        cx.executor().advance_clock(Duration::from_millis(20));
+        cx.run_until_parked();
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(observation.result().unwrap().unwrap().lifecycle_delivered);
+}
 
 /// The scroll estimate must count the rows the menu really emits, in both modes
 /// — a literal would go stale the next time a row is added (`IN-0043`).
@@ -45,12 +190,12 @@ fn the_menu_row_count_matches_the_rows_each_mode_emits() {
         assert_eq!(menu_rows(false, 0), 7);
         assert_eq!(menu_rows(false, 5), 12);
     }
-    // M1: an elevated window emits the three shells and nothing else.
-    assert_eq!(menu_rows(true, 0), 3);
+    // Administrator: shells, SSH heading, sessions, separator, Quick Connect.
+    assert_eq!(menu_rows(true, 0), 6);
     assert_eq!(
         menu_rows(true, 5),
-        3,
-        "an elevated window lists no saved sessions to count"
+        11,
+        "an elevated window lists saved sessions but no redundant runas or creation row"
     );
 }
 
@@ -105,7 +250,7 @@ fn filling_space_one_does_not_renumber_space_two(cx: &mut TestAppContext) {
         let view = cx.new(|cx| TerminalView::new(duplicate, panel.deps.clone(), window, cx));
         panel
             .tree
-            .fill_empty(space_one, view)
+            .fill_empty(space_one, view.into())
             .expect("Space #1 must be empty");
 
         assert_eq!(panel.empty_space_destinations(), vec![destinations[0]]);
@@ -162,7 +307,7 @@ fn closing_only_terminal_tab_keeps_empty_panel_for_new_tabs(cx: &mut TestAppCont
     let content_focus = panel.read_with(cx, |panel, cx| {
         panel
             .tree
-            .active_focus_handle(cx)
+            .active_focus_handle(|view| view.focus(cx))
             .expect("active Space has a content focus handle")
     });
     cx.update(|window, cx| {
@@ -300,7 +445,7 @@ fn phase0_close_last_space_calls_session_close(cx: &mut TestAppContext) {
     // Now explicitly close the session to verify the fake's close path.
     panel.update(cx, |p, cx| {
         if let Some(view) = p.tree.terminal_views().into_iter().next() {
-            let _ = view.read(cx).session.read(cx).close();
+            let _ = view.legacy().unwrap().read(cx).session.read(cx).close();
         }
     });
     assert_eq!(probe.close_calls(), 1);
@@ -337,7 +482,7 @@ fn phase0_close_non_last_space_closes_removed_session(cx: &mut TestAppContext) {
         let session_entity = cx.new(|_| session_b);
         let view = cx.new(|cx| TerminalView::new(session_entity, p.deps.clone(), window, cx));
         p.tree
-            .fill_empty(new_active, view)
+            .fill_empty(new_active, view.into())
             .expect("new split Space must be empty");
     });
 
@@ -374,7 +519,14 @@ fn phase1_shutdown_cancels_tasks_and_closes_session(cx: &mut TestAppContext) {
 
     // Verify the view starts alive with active tasks.
     let (alive, has_event, has_blink) = panel.read_with(cx, |p, cx| {
-        let view = p.tree.terminal_views().into_iter().next().unwrap();
+        let view = p
+            .tree
+            .terminal_views()
+            .into_iter()
+            .next()
+            .unwrap()
+            .legacy()
+            .unwrap();
         (
             view.read(cx).alive,
             view.read(cx).event_task.is_some(),
@@ -397,7 +549,14 @@ fn phase1_shutdown_cancels_tasks_and_closes_session(cx: &mut TestAppContext) {
 
     // View is no longer alive and tasks are taken (cancelled).
     let (alive, no_event, no_blink) = panel.read_with(cx, |p, cx| {
-        let view = p.tree.terminal_views().into_iter().next().unwrap();
+        let view = p
+            .tree
+            .terminal_views()
+            .into_iter()
+            .next()
+            .unwrap()
+            .legacy()
+            .unwrap();
         (
             view.read(cx).alive,
             view.read(cx).event_task.is_none(),
@@ -496,9 +655,11 @@ fn duplicate_test_commands() -> WorkspaceCommands {
     WorkspaceCommands {
         new_terminal_with_shell: terminal,
         open_quick_connect_dialog: window,
+        open_quick_connect_to: |_, _, _| {},
         open_new_saved_session_dialog: window,
         saved_ssh_sessions: saved_sessions,
         open_saved_ssh_session: open_saved_session,
+        open_saved_ssh_session_to: |_, _, _, _| {},
         open_duplicate_ssh_dialog: duplicate_ssh,
         open_settings: app,
         open_about: window,
@@ -564,7 +725,7 @@ fn duplicate_action_dispatches_to_the_active_space(cx: &mut TestAppContext) {
             });
             panel
                 .tree
-                .fill_empty(active_space, active_view)
+                .fill_empty(active_space, active_view.into())
                 .expect("new split Space must be empty");
             assert!(panel.empty_space_destinations().is_empty());
         });
@@ -603,7 +764,7 @@ fn duplicate_action_dispatches_to_the_active_space(cx: &mut TestAppContext) {
     let content_focus = panel.read_with(cx, |panel, cx| {
         panel
             .tree
-            .active_focus_handle(cx)
+            .active_focus_handle(|view| view.focus(cx))
             .expect("active Space has a content focus handle")
     });
     cx.update(|window, cx| {
@@ -779,7 +940,7 @@ fn the_tab_status_follows_a_single_space_and_selection_acknowledges(cx: &mut Tes
             .tree
             .terminal_views()
             .into_iter()
-            .find_map(|view| view.read(cx).program_status())
+            .find_map(|view| view.status(cx))
     });
     assert_eq!(kept, Some(ProgramState::Done));
 
@@ -794,7 +955,7 @@ fn the_tab_status_follows_a_single_space_and_selection_acknowledges(cx: &mut Tes
             .tree
             .terminal_views()
             .into_iter()
-            .find_map(|view| view.read(cx).program_status())
+            .find_map(|view| view.status(cx))
     });
     assert_eq!(after, None);
 }
@@ -869,7 +1030,7 @@ fn tab_channel_helpers_cover_every_space_of_the_tab(cx: &mut TestAppContext) {
         let view = cx.new(|cx| TerminalView::new(session, panel.deps.clone(), window, cx));
         panel
             .tree
-            .fill_empty(second_space, view)
+            .fill_empty(second_space, view.into())
             .expect("the new split Space must be empty");
     });
     cx.run_until_parked();
@@ -882,10 +1043,20 @@ fn tab_channel_helpers_cover_every_space_of_the_tab(cx: &mut TestAppContext) {
     );
 
     let first = panel
-        .read_with(cx, |panel, _| panel.tree.leaf_terminal(first_space))
+        .read_with(cx, |panel, _| {
+            panel
+                .tree
+                .leaf_terminal(first_space)
+                .and_then(|pane| pane.legacy())
+        })
         .expect("the first Space holds a terminal");
     let second = panel
-        .read_with(cx, |panel, _| panel.tree.leaf_terminal(second_space))
+        .read_with(cx, |panel, _| {
+            panel
+                .tree
+                .leaf_terminal(second_space)
+                .and_then(|pane| pane.legacy())
+        })
         .expect("the second Space holds a terminal");
 
     first.update(cx, |view, cx| view.join_channel(InputChannel::A, cx));
@@ -949,16 +1120,26 @@ fn an_exited_space_leaves_the_tab_chips(cx: &mut TestAppContext) {
         let view = cx.new(|cx| TerminalView::new(session, panel.deps.clone(), window, cx));
         panel
             .tree
-            .fill_empty(second_space, view)
+            .fill_empty(second_space, view.into())
             .expect("the new split Space must be empty");
     });
     cx.run_until_parked();
 
     let first = panel
-        .read_with(cx, |panel, _| panel.tree.leaf_terminal(first_space))
+        .read_with(cx, |panel, _| {
+            panel
+                .tree
+                .leaf_terminal(first_space)
+                .and_then(|pane| pane.legacy())
+        })
         .expect("the first Space holds a terminal");
     let second = panel
-        .read_with(cx, |panel, _| panel.tree.leaf_terminal(second_space))
+        .read_with(cx, |panel, _| {
+            panel
+                .tree
+                .leaf_terminal(second_space)
+                .and_then(|pane| pane.legacy())
+        })
         .expect("the second Space holds a terminal");
     first.update(cx, |view, cx| view.join_channel(InputChannel::A, cx));
     second.update(cx, |view, cx| view.join_channel(InputChannel::B, cx));
@@ -1013,7 +1194,7 @@ fn joining_the_tab_skips_an_exited_space(cx: &mut TestAppContext) {
         let view = cx.new(|cx| TerminalView::new(session, panel.deps.clone(), window, cx));
         panel
             .tree
-            .fill_empty(second_space, view)
+            .fill_empty(second_space, view.into())
             .expect("the new split Space must be empty");
     });
     cx.run_until_parked();
@@ -1023,10 +1204,20 @@ fn joining_the_tab_skips_an_exited_space(cx: &mut TestAppContext) {
         panel.join_tab_to_channel(InputChannel::C, cx)
     });
     let first = panel
-        .read_with(cx, |panel, _| panel.tree.leaf_terminal(first_space))
+        .read_with(cx, |panel, _| {
+            panel
+                .tree
+                .leaf_terminal(first_space)
+                .and_then(|pane| pane.legacy())
+        })
         .expect("the first Space holds a terminal");
     let second = panel
-        .read_with(cx, |panel, _| panel.tree.leaf_terminal(second_space))
+        .read_with(cx, |panel, _| {
+            panel
+                .tree
+                .leaf_terminal(second_space)
+                .and_then(|pane| pane.legacy())
+        })
         .expect("the second Space holds a terminal");
     assert_eq!(first.update(cx, |view, cx| view.channel(cx)), None);
     assert_eq!(
@@ -2148,37 +2339,38 @@ fn verify_the_empty_space_still_wins_over_the_terminal_root_catch_all(cx: &mut T
     // The kit's strip tab for the source, grabbed by its leading padding or by its title (the
     // middle of the tab): both start the dock's `DragPanel`, the row inside the tab starts none
     // of its own (`US-0202`).
-    let drop_at = |fraction: f32, by_title: bool, cx: &mut VisualTestContext| {
-        let tab = cx
-            .debug_bounds("dock-tab-1")
-            .expect("the source's strip tab is drawn");
-        let from = if by_title {
-            tab.center()
-        } else {
-            point(tab.left() + px(3.), tab.center().y)
+    let drop_at =
+        |fraction: f32, by_title: bool, source_tab: &'static str, cx: &mut VisualTestContext| {
+            let tab = cx
+                .debug_bounds(source_tab)
+                .expect("the source's strip tab is drawn");
+            let from = if by_title {
+                tab.center()
+            } else {
+                point(tab.left() + px(3.), tab.center().y)
+            };
+            let to = point(
+                area.left() + area.size.width * fraction,
+                area.top() + area.size.height * 0.5,
+            );
+            cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+            cx.simulate_mouse_move(
+                from + point(px(0.), px(6.)),
+                MouseButton::Left,
+                Modifiers::none(),
+            );
+            cx.simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+            assert!(
+                cx.update(|_, cx| cx.has_active_drag()),
+                "the tab starts a drag (by title: {by_title})"
+            );
+            cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+            cx.run_until_parked();
         };
-        let to = point(
-            area.left() + area.size.width * fraction,
-            area.top() + area.size.height * 0.5,
-        );
-        cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
-        cx.simulate_mouse_move(
-            from + point(px(0.), px(6.)),
-            MouseButton::Left,
-            Modifiers::none(),
-        );
-        cx.simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
-        assert!(
-            cx.update(|_, cx| cx.has_active_drag()),
-            "the tab starts a drag (by title: {by_title})"
-        );
-        cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
-        cx.run_until_parked();
-    };
 
-    // (1) On the live terminal, left edge zone: blocked. The source keeps its terminal and its
-    // tab, the centre stays one group.
-    drop_at(0.15, false, cx);
+    // (1) The destination's own tab over its occupied Space stays blocked.
+    // Cross-tab occupied drops now split directionally; same-tab ones do not.
+    drop_at(0.15, false, "dock-tab-0", cx);
     assert_eq!(groups(cx), 1, "no split under a terminal");
     assert!(
         dock_area.read_with(cx, |area, _| area.panel(source_id).is_some())
@@ -2190,7 +2382,7 @@ fn verify_the_empty_space_still_wins_over_the_terminal_root_catch_all(cx: &mut T
     // (2) On the empty Space, right half: the Space is deeper than the panel root, so it is asked
     // first and the terminal moves in, from the tab's title as from its padding; the emptied
     // source tab goes, its session lives on.
-    drop_at(0.85, true, cx);
+    drop_at(0.85, true, "dock-tab-1", cx);
     assert!(
         target.read_with(cx, |panel, _| panel.tree.leaf_terminal(empty).is_some()),
         "the empty Space took the dragged tab's terminal"

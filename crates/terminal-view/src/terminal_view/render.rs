@@ -89,11 +89,11 @@ impl ThemeKey {
 /// The few gpui theme colours the overlays need — read by value instead of
 /// cloning the whole `Theme` per frame.
 #[derive(Clone, Copy)]
-pub(super) struct OverlayColors {
-    blue: Hsla,
-    danger: Hsla,
-    warning: Hsla,
-    muted: Hsla,
+pub(crate) struct OverlayColors {
+    pub(crate) blue: Hsla,
+    pub(crate) danger: Hsla,
+    pub(crate) warning: Hsla,
+    pub(crate) muted: Hsla,
 }
 
 /// The settings a frame reads, copied out so the settings borrow ends before
@@ -295,7 +295,7 @@ impl Render for TerminalView {
         });
         let element = TerminalElement::new(TerminalElementSpec {
             id: "terminal-grid".into(),
-            session: session.clone(),
+            session: crate::render::element::ElementSession::Legacy(session.clone()),
             state: self.render_state.clone(),
             ime,
         });
@@ -472,7 +472,7 @@ impl TerminalView {
 
 /// Build the terminal GPUI font from settings: `calt` (ligatures) off unless
 /// listed in `font_features`; every listed feature is enabled.
-pub(super) fn terminal_font(settings: &TerminalSettings, font_family: &SharedString) -> Font {
+pub(crate) fn terminal_font(settings: &TerminalSettings, font_family: &SharedString) -> Font {
     let mut features: Vec<(String, u32)> =
         vec![("calt".to_string(), u32::from(settings.font_ligatures))];
     for f in &settings.font_features {
@@ -498,7 +498,7 @@ pub(super) fn terminal_font(settings: &TerminalSettings, font_family: &SharedStr
 }
 
 /// The configured cursor shape; `Hidden` only ever comes from the snapshot.
-fn cursor_shape_from_setting(shape: TerminalCursorShape) -> CursorShape {
+pub(crate) fn cursor_shape_from_setting(shape: TerminalCursorShape) -> CursorShape {
     match shape {
         TerminalCursorShape::Block => CursorShape::Block,
         TerminalCursorShape::Bar => CursorShape::Beam,
@@ -543,7 +543,7 @@ pub(super) fn progress_style(
 }
 
 /// Taskbar progress overlay (OSC 9;4) — a thin bar along the top edge.
-fn progress_overlay(
+pub(crate) fn progress_overlay(
     progress: Option<TerminalProgress>,
     colors: OverlayColors,
 ) -> Option<impl IntoElement> {
@@ -588,7 +588,7 @@ pub(super) fn bell_badge_visible(has_bell: bool, bell_enabled: bool) -> bool {
 }
 
 /// Bell indicator (top-right corner).
-fn bell_badge(
+pub(crate) fn bell_badge(
     has_bell: bool,
     bell_enabled: bool,
     colors: OverlayColors,
@@ -612,7 +612,7 @@ fn bell_badge(
 /// The scanner uses the profile's prompt regex to detect prompt lines (when
 /// OSC 133 row roles are absent). A mismatch makes prompt+command lines plain
 /// output — losing command/option highlighting.
-fn shell_kind_to_profile(kind: ShellKind) -> ShellProfile {
+pub(crate) fn shell_kind_to_profile(kind: ShellKind) -> ShellProfile {
     match kind {
         ShellKind::Cmd => ShellProfile::Cmd,
         ShellKind::PowerShell | ShellKind::Pwsh => ShellProfile::PowerShell,

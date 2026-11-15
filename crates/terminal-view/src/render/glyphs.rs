@@ -831,9 +831,9 @@ mod tests {
             assert_eq!((stats.ascii_layouts, stats.shape_calls), (0, 1));
             assert!(cache.ascii[&key].is_none(), "Segoe UI fails the check");
 
-            // US-0146 F1: Fira Code's `ccmp` turns a backtick after A-Z or a
-            // backtick into `grave.case`, with ligatures off; the pair walk sees
-            // it, so every variant keeps shaping. Only where it is installed.
+            // US-0146 F1 / US-0248: some Fira versions have a required backtick
+            // substitution; older versions do not. Witness the actual behavior,
+            // not the family name, and require exact parity on either path.
             if window
                 .text_system()
                 .all_font_names()
@@ -849,16 +849,58 @@ mod tests {
                 );
                 for (bold, italic) in [(false, false), (true, false), (false, true)] {
                     let (f, key) = fira.get(bold, italic);
-                    let mut cache = GlyphCache::new();
-                    let mut stats = FrameStats::default();
-                    let started = std::time::Instant::now();
-                    cache.shape("A`B`", f, key, gpui::px(13.0), None, window, &mut stats);
-                    eprintln!("Fira Code check: {:?}", started.elapsed());
-                    assert_eq!((stats.ascii_layouts, stats.shape_calls), (0, 1));
-                    assert!(cache.ascii[&key].is_none(), "Fira Code {bold} {italic}");
+                    let size = gpui::px(13.0);
+                    let glyph_ids = |text: &str| {
+                        let layout = window.text_system().layout_line(
+                            text,
+                            size,
+                            &[text_run(text.len(), f)],
+                            None,
+                        );
+                        layout.runs.iter().flat_map(|run| {
+                            run.glyphs.iter().map(|glyph| glyph.id)
+                        }).collect::<Vec<_>>()
+                    };
+                    let witness = ["A`", "Z`", "``"].into_iter().find(|text| {
+                        let isolated: Vec<_> = text.as_bytes().iter().flat_map(|byte| {
+                            glyph_ids(std::str::from_utf8(std::slice::from_ref(byte)).unwrap())
+                        }).collect();
+                        glyph_ids(text) != isolated
+                    });
+                    let table = AsciiGlyphs::read(f, size, window);
+                    eprintln!(
+                        "Fira Code bold={bold} italic={italic}: witness={witness:?}, fast={}",
+                        table.is_some()
+                    );
+                    if let Some(text) = witness {
+                        assert!(table.is_none(),
+                            "Fira Code {bold} {italic}: contextual {text:?} must reject the table");
+                    }
+                    let probes: Vec<_> = lines.into_iter().chain([
+                        "`", "A`", "Z`", "``", "A`B`", PROBES,
+                        "ffi ffl === !== <=> ==> <!-- --> ::= ... www",
+                    ]).collect();
+                    for force in [None, Some(gpui::px(8.0)), Some(gpui::px(9.5))] {
+                        let mut cache = GlyphCache::new();
+                        let mut stats = FrameStats::default();
+                        for text in &probes {
+                            let actual = cache.shape(text, f, key, size, force, window, &mut stats);
+                            let shaped = window.text_system().layout_line_by_hash(
+                                GlyphCache::text_hash(text), text.len(), size,
+                                &[text_run(text.len(), f)], force,
+                                || SharedString::from(text.to_string()),
+                            );
+                            assert!(same_layout(&actual, &shaped),
+                                "Fira Code {bold} {italic} {text:?} {force:?}, witness={witness:?}\n{actual:?}\n{shaped:?}");
+                        }
+                        let count = probes.len() as u32;
+                        assert_eq!((stats.ascii_layouts, stats.shape_calls),
+                            (if table.is_some() { count } else { 0 }, count),
+                            "Fira Code {bold} {italic} {force:?}, witness={witness:?}");
+                    }
                 }
             } else {
-                eprintln!("Fira Code not installed: its rejection is not exercised");
+                eprintln!("Fira Code not installed: its real-font parity is not exercised");
             }
         });
     }

@@ -1,13 +1,13 @@
 //! The per-frame terminal snapshot in view-owned types.
 //!
-//! This is the only file under `render/` that names the engine's own types: it
-//! wraps `TerminalContent` — which owns this view's `SnapshotState` and therefore
-//! its damage watermark — and exposes cells, cursor, selection and the changed
+//! This is the only file under `render/` that names the engine's paint values: it
+//! wraps `TerminalContent` — which owns this view's damage watermark — and
+//! exposes cells, cursor, selection and the changed
 //! rows through `Cell`, `Color`, `CellFlags`, `CursorShape` and `Selection`, so
 //! the rest of the engine never depends on the grid implementation (HLD idea 3).
 //!
 //! Since `US-0085` there is no copy in between. A `FrameRow` borrows the
-//! engine's `SnapshotRow` and a `Cell` is read out of it on demand, with the style
+//! application's `RenderRow` and a `Cell` is read out of it on demand, with the style
 //! taken from the row's **runs of resolved values** rather than from a per-cell
 //! record: at 120 columns that is about three style conversions per row instead
 //! of a hundred and twenty, and the dense `IndexedCell` vector the view used to
@@ -17,8 +17,8 @@ use std::sync::Arc;
 
 use oneterm_terminal::{
     Attrs, CellWidth, Color as EngineColor, CursorShape as EngineCursorShape, GraphicData,
-    GraphicId, HyperlinkId, ModeSnapshot, NamedColor, RowId, Semantic, SeqNo, SnapshotContent,
-    SnapshotPlacement, SnapshotRow, SnapshotUpdate, Style, TerminalContent, TerminalSession,
+    GraphicId, HyperlinkId, ModeSnapshot, NamedColor, RenderRow, RowId, Semantic, SnapshotContent,
+    SnapshotPlacement, SnapshotUpdate, Style, TerminalContent, TerminalSession,
 };
 
 /// FNV-1a, the hash used for shaped-run keys and the style key.
@@ -65,16 +65,21 @@ pub(crate) struct GridSize {
 }
 
 /// What identifies a row's content for the plan cache: which row it is, and the
-/// engine batch that last changed it.
-///
-/// This replaces the per-row content hash the cache used to compute every frame.
-/// The engine stamps a row only when it actually changes and copies a row into
-/// the snapshot state only when the stamp passed this consumer's watermark, so the
-/// pair answers "does this plan still describe this row?" exactly, for free.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) struct RowKey {
-    pub id: RowId,
-    pub seq: SeqNo,
+/// content that last changed it. Shipping snapshots use RowId/SeqNo; native
+/// staging rows use exact immutable content equality, never RowId arithmetic.
+pub(crate) type RowKey = oneterm_terminal::RenderRowKey;
+
+#[cfg(feature = "ghostty-native")]
+pub(crate) fn native_cell_end_column(
+    viewport: &oneterm_terminal::ghostty_content::Viewport,
+    row: usize,
+    column: u16,
+) -> u16 {
+    let width = viewport
+        .row(row)
+        .and_then(|row| row.cells().get(usize::from(column)))
+        .map_or(1, |cell| if cell.width == CellWidth::Wide { 2 } else { 1 });
+    column.saturating_add(width).min(viewport.columns())
 }
 
 /// A cell color before palette resolution. `theme.color(c)` maps it to `Hsla`.
@@ -92,9 +97,24 @@ pub(crate) enum Color {
     /// 0..=255.
     Indexed(u8),
     Rgb(u8, u8, u8),
+    /// Native effective default/ANSI RGB, still subject to shared contrast.
+    #[cfg(feature = "ghostty-native")]
+    ThemeRgb(u8, u8, u8),
+    /// Native effective default foreground, eligible for semantic coloring.
+    #[cfg(feature = "ghostty-native")]
+    DefaultRgb(u8, u8, u8),
 }
 
 impl Color {
+    pub(crate) fn is_default_foreground(self) -> bool {
+        match self {
+            Self::Foreground => true,
+            #[cfg(feature = "ghostty-native")]
+            Self::DefaultRgb(..) => true,
+            _ => false,
+        }
+    }
+
     /// True-color or extended-palette foregrounds are exactly what the program
     /// asked for; contrast enforcement leaves them alone.
     pub(crate) fn is_app_chosen_exact(self) -> bool {
@@ -155,6 +175,10 @@ impl Color {
             Color::DimAnsi(n) => EngineColor::Named(DIM_NAMED[usize::from(n.min(7))]),
             Color::Indexed(n) => EngineColor::Palette(n),
             Color::Rgb(r, g, b) => EngineColor::Rgb(oneterm_terminal::Rgb { r, g, b }),
+            #[cfg(feature = "ghostty-native")]
+            Color::ThemeRgb(r, g, b) | Color::DefaultRgb(r, g, b) => {
+                EngineColor::Rgb(oneterm_terminal::Rgb { r, g, b })
+            }
         }
     }
 }
@@ -323,25 +347,25 @@ impl Cell<'_> {
 /// One display row of the frame.
 #[derive(Clone, Copy)]
 pub(crate) struct FrameRow<'a> {
-    row: &'a SnapshotRow,
+    row: RenderRow<'a>,
     index: usize,
 }
 
 impl<'a> FrameRow<'a> {
     pub(crate) fn len(&self) -> usize {
-        self.row.cells.len()
+        self.row.cells().len()
     }
 
-    pub(crate) fn id(&self) -> RowId {
-        self.row.id
+    pub(crate) fn id(&self) -> Option<RowId> {
+        self.row.logical_id()
     }
 
     pub(crate) fn cell(&self, col: usize) -> Cell<'a> {
-        let cell = &self.row.cells[col];
+        let cell = &self.row.cells()[col];
         let style: &Style = self.row.style_of(cell);
-        let last = self.row.cells.len().saturating_sub(1);
+        let last = self.row.cells().len().saturating_sub(1);
         let mut flags = CellFlags::from_attrs(style.attrs).union(CellFlags::from_width(cell.width));
-        if self.row.wrapped && col == last {
+        if self.row.wrapped() && col == last {
             flags = flags.union(CellFlags::WRAPLINE);
         }
         let (ch, zerowidth) = match cell.content {
@@ -354,9 +378,20 @@ impl<'a> FrameRow<'a> {
                 }
             }
         };
+        let fg = Color::from_engine(style.fg);
+        #[cfg(feature = "ghostty-native")]
+        let fg = match (fg, self.row.native_foreground_is_exact(col)) {
+            (Color::Rgb(r, g, b), Some(false))
+                if self.row.native_foreground_is_default(col) == Some(true) =>
+            {
+                Color::DefaultRgb(r, g, b)
+            }
+            (Color::Rgb(r, g, b), Some(false)) => Color::ThemeRgb(r, g, b),
+            _ => fg,
+        };
         Cell {
             ch,
-            fg: Color::from_engine(style.fg),
+            fg,
             bg: Color::from_engine(style.bg),
             flags,
             zerowidth,
@@ -367,12 +402,12 @@ impl<'a> FrameRow<'a> {
     }
 
     pub(crate) fn cells(&self) -> impl Iterator<Item = Cell<'a>> + '_ {
-        (0..self.row.cells.len()).map(|col| self.cell(col))
+        (0..self.row.cells().len()).map(|col| self.cell(col))
     }
 
     /// The logical line continues on the next row.
     pub(crate) fn wraps(&self) -> bool {
-        self.row.wrapped
+        self.row.wrapped()
     }
 
     /// Append the row's display text for the semantic scanner: one entry per
@@ -439,6 +474,7 @@ pub(crate) struct Cursor {
     pub row: i32,
     pub col: u16,
     pub shape: CursorShape,
+    pub blinking: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -459,6 +495,10 @@ pub(crate) struct Selection {
 pub(crate) struct Frame {
     content: TerminalContent,
     size: GridSize,
+    #[cfg(feature = "ghostty-native")]
+    native: Option<oneterm_terminal::ghostty_content::Content>,
+    #[cfg(feature = "ghostty-native")]
+    source_changed: bool,
 }
 
 impl Default for Frame {
@@ -468,15 +508,35 @@ impl Default for Frame {
 }
 
 impl Frame {
+    #[cfg(feature = "ghostty-native")]
+    pub(crate) fn native_viewport(&self) -> Option<oneterm_terminal::ghostty_content::Viewport> {
+        self.native.as_ref()?.viewport().cloned()
+    }
     pub(crate) fn new() -> Self {
         let content = TerminalContent::default();
         let size = size_of(&content);
-        Self { content, size }
+        Self {
+            content,
+            size,
+            #[cfg(feature = "ghostty-native")]
+            native: None,
+            #[cfg(feature = "ghostty-native")]
+            source_changed: false,
+        }
     }
 
     /// The frame's only `snapshot_into`: it advances this frame's damage
     /// watermark, so it must run exactly once per painted frame.
     pub(crate) fn snapshot(&mut self, session: &dyn TerminalSession) {
+        #[cfg(feature = "ghostty-native")]
+        {
+            self.source_changed = false;
+            if let Some(source) = session.native_render_source() {
+                self.snapshot_native(source);
+                return;
+            }
+            self.source_changed = self.native.take().is_some();
+        }
         session.snapshot_into(&mut self.content);
         self.size = size_of(&self.content);
     }
@@ -485,30 +545,87 @@ impl Frame {
         self.size
     }
 
+    #[cfg(feature = "ghostty-native")]
+    pub(crate) fn snapshot_native(
+        &mut self,
+        source: &dyn oneterm_terminal::ghostty_content::RenderSource,
+    ) {
+        self.source_changed = !self
+            .native
+            .as_ref()
+            .is_some_and(|content| content.is_source(source));
+        if self.source_changed {
+            self.native = Some(oneterm_terminal::ghostty_content::Content::new(source));
+        }
+        let content = self
+            .native
+            .get_or_insert_with(|| oneterm_terminal::ghostty_content::Content::new(source));
+        if let Err(error) = content.poll() {
+            log::error!("Native terminal frame poll failed; retaining last-good viewport: {error}");
+        }
+        self.size = content
+            .viewport()
+            .map_or(GridSize { rows: 0, cols: 0 }, |viewport| GridSize {
+                rows: viewport.lines() as u16,
+                cols: viewport.columns(),
+            });
+    }
+
     /// What the last snapshot did: nothing, a shift plus [`changed`](Self::changed),
     /// or everything.
     pub(crate) fn update(&self) -> SnapshotUpdate {
+        #[cfg(feature = "ghostty-native")]
+        if self.source_changed {
+            return SnapshotUpdate::Full;
+        }
+        #[cfg(feature = "ghostty-native")]
+        if let Some(content) = &self.native {
+            return match content.damage() {
+                oneterm_terminal::ghostty::owner::Damage::None => SnapshotUpdate::Unchanged,
+                oneterm_terminal::ghostty::owner::Damage::Full => SnapshotUpdate::Full,
+                oneterm_terminal::ghostty::owner::Damage::Rows(_) => {
+                    SnapshotUpdate::Partial { scrolled: 0 }
+                }
+            };
+        }
         self.content.update()
     }
 
-    pub(crate) fn display_offset(&self) -> usize {
-        self.content.scroll_offset() as usize
+    pub(crate) fn display_offset(&self) -> Option<usize> {
+        // Native scrollbar offsets are not absolute legacy history identities.
+        #[cfg(feature = "ghostty-native")]
+        if self.native.is_some() {
+            return None;
+        }
+        Some(self.content.scroll_offset() as usize)
     }
 
     /// Images the engine decoded since the previous snapshot (each appears once).
     pub(crate) fn graphics(&self) -> &[Arc<GraphicData>] {
+        #[cfg(feature = "ghostty-native")]
+        if self.native.is_some() {
+            return &[];
+        }
         self.content.graphics()
     }
 
     /// The cell's `(col, row)` offset inside the image's own cell grid, which is
     /// what the painter anchors the image by.
     pub(crate) fn graphic_offset(&self, id: GraphicId, row: RowId, col: u16) -> Option<(u16, u16)> {
+        #[cfg(feature = "ghostty-native")]
+        if self.native.is_some() {
+            return None;
+        }
         self.content.graphic_offset(id, row, col)
     }
 
     /// The placement an image id names, for the cell footprint the painter
     /// clips to (`BUG-0062`). `None` once the image is gone.
     pub(crate) fn placement(&self, id: GraphicId) -> Option<&SnapshotPlacement> {
+        #[cfg(feature = "ghostty-native")]
+        if self.native.is_some() {
+            return None;
+        }
         self.content.placement(id)
     }
 
@@ -519,27 +636,77 @@ impl Frame {
     /// this exists to pin the resolution, not to serve a painter.
     #[cfg(test)]
     pub(crate) fn hyperlink_uri(&self, id: HyperlinkId) -> Option<&str> {
+        #[cfg(feature = "ghostty-native")]
+        if self.native.is_some() {
+            return None;
+        }
         self.content.hyperlink(id).map(|link| link.uri.as_ref())
     }
 
     /// Display row `r`. The snapshot state always holds the full viewport, so a
     /// row index below `size().rows` always resolves.
     pub(crate) fn row(&self, r: usize) -> FrameRow<'_> {
+        #[cfg(feature = "ghostty-native")]
+        if let Some(content) = &self.native {
+            return FrameRow {
+                row: content
+                    .viewport()
+                    .and_then(|viewport| viewport.row(r))
+                    .expect("paint row is bounded by the retained native viewport"),
+                index: r,
+            };
+        }
         FrameRow {
-            row: &self.content.rows()[r],
+            row: RenderRow::Snapshot(&self.content.rows()[r]),
             index: r,
         }
     }
 
     /// The identity of display row `r`, for the plan cache.
     pub(crate) fn row_key(&self, r: usize) -> Option<RowKey> {
-        self.content.rows().get(r).map(|row| RowKey {
-            id: row.id,
-            seq: row.seq,
-        })
+        #[cfg(feature = "ghostty-native")]
+        if let Some(content) = &self.native {
+            return content
+                .viewport()
+                .and_then(|viewport| viewport.row(r))
+                .map(|row| row.key());
+        }
+        self.content
+            .rows()
+            .get(r)
+            .map(|row| RenderRow::Snapshot(row).key())
     }
 
     pub(crate) fn cursor(&self) -> Cursor {
+        #[cfg(feature = "ghostty-native")]
+        if let Some(content) = &self.native {
+            let Some(viewport) = content.viewport() else {
+                return Cursor {
+                    row: -1,
+                    col: 0,
+                    shape: CursorShape::Hidden,
+                    blinking: false,
+                };
+            };
+            let native = viewport.cursor();
+            let shape = if !native.visible || native.position.is_none() {
+                CursorShape::Hidden
+            } else {
+                use oneterm_terminal::ghostty::render::CursorShape as NativeShape;
+                match native.shape {
+                    NativeShape::Bar => CursorShape::Beam,
+                    NativeShape::Block => CursorShape::Block,
+                    NativeShape::Underline => CursorShape::Underline,
+                    NativeShape::HollowBlock => CursorShape::HollowBlock,
+                }
+            };
+            return Cursor {
+                row: native.position.map_or(-1, |(_, row)| i32::from(row)),
+                col: native.position.map_or(0, |(col, _)| col),
+                shape,
+                blinking: native.blinking,
+            };
+        }
         let cursor = self.content.render_cursor();
         let shape = if cursor.visible {
             CursorShape::from_engine(self.content.cursor_shape())
@@ -552,10 +719,16 @@ impl Frame {
             row: cursor.row.map_or(-1, i32::from),
             col: cursor.col,
             shape,
+            // Preserve the existing application blink policy for legacy frames.
+            blinking: true,
         }
     }
 
     pub(crate) fn selection(&self) -> Option<Selection> {
+        #[cfg(feature = "ghostty-native")]
+        if self.native.is_some() {
+            return None;
+        }
         let top = self.content.viewport_top();
         let display_row = |row: RowId| -> i32 {
             (row.0 as i64 - top.0 as i64).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
@@ -575,8 +748,69 @@ impl Frame {
 
     /// The engine modes as of the last paint; `send_key` reads DECCKM from
     /// it (arrows send `ESC O x` instead of `ESC [ x`).
-    pub(crate) fn modes(&self) -> ModeSnapshot {
-        self.content.modes()
+    pub(crate) fn modes(&self) -> Option<ModeSnapshot> {
+        #[cfg(feature = "ghostty-native")]
+        if self.native.is_some() {
+            return None;
+        }
+        Some(self.content.modes())
+    }
+
+    pub(crate) fn reverse_video(&self) -> bool {
+        #[cfg(feature = "ghostty-native")]
+        if let Some(content) = &self.native {
+            return content
+                .viewport()
+                .is_some_and(|viewport| viewport.metadata().modes.reverse_colors);
+        }
+        self.content.modes().reverse_video
+    }
+
+    /// Native captures already resolve OSC overrides and reverse-video defaults.
+    /// Keep the element padding and cursor in the same publication as its rows.
+    pub(crate) fn background(&self) -> Option<Color> {
+        #[cfg(feature = "ghostty-native")]
+        if let Some(content) = &self.native {
+            return content.viewport().map(|viewport| {
+                let rgb = viewport.background();
+                Color::Rgb(rgb.r, rgb.g, rgb.b)
+            });
+        }
+        None
+    }
+
+    pub(crate) fn cursor_color(&self) -> Option<Color> {
+        #[cfg(feature = "ghostty-native")]
+        if let Some(content) = &self.native {
+            return content
+                .viewport()
+                .and_then(|viewport| viewport.cursor_color())
+                .map(|rgb| Color::Rgb(rgb.r, rgb.g, rgb.b));
+        }
+        None
+    }
+
+    pub(crate) fn selection_spans(&self, out: &mut Vec<super::overlay::RowSpan>) {
+        out.clear();
+        #[cfg(feature = "ghostty-native")]
+        if let Some(content) = &self.native {
+            if let Some(viewport) = content.viewport() {
+                out.extend(
+                    viewport
+                        .selection_spans()
+                        .iter()
+                        .map(|span| super::overlay::RowSpan {
+                            row: span.row,
+                            col: span.columns.start,
+                            cols: span.columns.end - span.columns.start,
+                        }),
+                );
+            }
+            return;
+        }
+        if let Some(selection) = self.selection() {
+            super::overlay::selection_rects(selection, self.size, out);
+        }
     }
 }
 
@@ -814,7 +1048,17 @@ pub(crate) mod test_support {
             let mut content = TerminalContent::default();
             fixture.refill(&mut content);
             let size = size_of(&content);
-            (Frame { content, size }, fixture)
+            (
+                Frame {
+                    content,
+                    size,
+                    #[cfg(feature = "ghostty-native")]
+                    native: None,
+                    #[cfg(feature = "ghostty-native")]
+                    source_changed: false,
+                },
+                fixture,
+            )
         }
 
         pub(crate) fn build(self) -> Frame {
@@ -873,6 +1117,79 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::FrameBuilder;
     use super::*;
+
+    #[cfg(feature = "ghostty-native")]
+    #[test]
+    fn ghostty_rows_use_the_existing_cell_and_text_scanner_path() {
+        use oneterm_terminal::ghostty_bridge::{AsyncEngine, Command};
+        use oneterm_terminal::ghostty_content::Content;
+        use std::future::Future;
+        use std::task::{Context, Poll, Wake, Waker};
+
+        struct ThreadWake(std::thread::Thread);
+        impl Wake for ThreadWake {
+            fn wake(self: Arc<Self>) {
+                self.0.unpark();
+            }
+        }
+        fn complete<F: Future>(future: F) -> F::Output {
+            let waker = Waker::from(Arc::new(ThreadWake(std::thread::current())));
+            let mut cx = Context::from_waker(&waker);
+            let mut future = std::pin::pin!(future);
+            loop {
+                match future.as_mut().poll(&mut cx) {
+                    Poll::Ready(value) => return value,
+                    Poll::Pending => std::thread::park(),
+                }
+            }
+        }
+        let engine = AsyncEngine::spawn(8, 2).unwrap();
+        complete(
+            engine
+                .request(Command::Feed(
+                    "\x1b[?2027h\x1b[1;3;4:3;38;2;11;22;33m日e\u{301}abcdeZ"
+                        .as_bytes()
+                        .to_vec(),
+                ))
+                .unwrap()
+                .wait(),
+        )
+        .unwrap();
+        complete(engine.request(Command::Capture).unwrap().wait()).unwrap();
+        let mut content = Content::new(&engine.model());
+        content.poll().unwrap();
+        let viewport = content.viewport().unwrap().clone();
+        complete(engine.close()).unwrap();
+        let row = FrameRow {
+            row: viewport.rows(0, 1).next().unwrap(),
+            index: 0,
+        };
+        assert_eq!(row.id(), None, "opaque native row is not a history anchor");
+        assert_eq!(row.cell(0).ch, '日');
+        assert!(row.cell(1).is_spacer());
+        assert_eq!(row.cell(2).zerowidth, &['\u{301}']);
+        assert_eq!(row.cell(0).fg, Color::Rgb(11, 22, 33));
+        assert!(
+            row.cell(0).flags.contains(
+                CellFlags::BOLD
+                    .union(CellFlags::ITALIC)
+                    .union(CellFlags::UNDERCURL)
+            )
+        );
+        assert!(row.cell(7).flags.contains(CellFlags::WRAPLINE));
+        let (mut text, mut rows, mut cols, mut wide, mut semantic) = (
+            String::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        row.append_text_into(&mut text, &mut rows, &mut cols, &mut wide, &mut semantic);
+        assert_eq!(text, "日eabcde");
+        assert_eq!(cols, [0, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(wide, [true, false, false, false, false, false, false]);
+        assert_eq!(rows, [0; 7]);
+    }
 
     #[test]
     fn frame_colors_convert_round_trip() {
@@ -992,8 +1309,8 @@ mod tests {
             (cursor.row, cursor.col, cursor.shape),
             (4, 2, CursorShape::Beam)
         );
-        assert_eq!(frame.display_offset(), 0);
-        assert!(!frame.modes().app_cursor);
+        assert_eq!(frame.display_offset(), Some(0));
+        assert!(!frame.modes().unwrap().app_cursor);
     }
 
     #[test]

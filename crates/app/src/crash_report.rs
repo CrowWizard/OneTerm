@@ -83,7 +83,10 @@ pub(crate) fn delete_pending_report(path: PathBuf) -> io::Result<()> {
 fn crashes_dir() -> PathBuf {
     crashes_dir_in(
         &oneterm_core::config_dir(),
-        oneterm_core::elevation::is_restricted(),
+        !matches!(
+            oneterm_core::elevation::elevation(),
+            oneterm_core::elevation::Elevation::NotElevated
+        ),
     )
 }
 

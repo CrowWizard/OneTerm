@@ -50,7 +50,7 @@ pub(crate) fn resolve(frame: &Frame, config: &CursorConfig) -> Option<ResolvedCu
     }
     // An unfocused terminal always shows its (hollow) cursor; a focused one
     // honors the blink phase (parity item 17).
-    if config.focused && !config.blink_visible {
+    if config.focused && cursor.blinking && !config.blink_visible {
         return None;
     }
     let shape = config.shape.unwrap_or(cursor.shape);
@@ -117,7 +117,10 @@ impl CursorPaint {
             }
             _ => Bounds::from_corners(cell_origin, cell_end),
         };
-        let color = config.color.unwrap_or_else(|| theme.color(Color::Cursor));
+        let color = config
+            .color
+            .or_else(|| frame.cursor_color().map(|color| theme.color(color)))
+            .unwrap_or_else(|| theme.color(Color::Cursor));
         let glyph = if resolved.repaint_glyph {
             let cell = frame.row(row).cell(col);
             let bg = if cell.flags.contains(CellFlags::INVERSE) {

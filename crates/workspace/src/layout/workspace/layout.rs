@@ -53,10 +53,8 @@ pub(crate) fn apply_center_reset(
                     view.set_dock_size(DockPlacement::Right, right_size, window, cx);
                     view.set_dock_collapsible(DockPlacement::Right, true, window, cx);
                 }
-                // Removed, not merely "not added": declining to call `set_dock`
-                // leaves a dock that is already there, which is how a restored
-                // `ssh_client` dock survived into an elevated window
-                // (`IN-0043` MAJ-2). `remove_dock` is a no-op when there is none.
+                // An unknown token must remove any existing network dock, not
+                // merely decline to add one. Removal is a no-op if absent.
                 None => view.remove_dock(DockPlacement::Right, window, cx),
             }
             view.dump(cx)
@@ -66,15 +64,8 @@ pub(crate) fn apply_center_reset(
 
 /// The right dock's content, or `None` when this window has no right dock.
 ///
-/// M1 (`DEC-0019`): an elevated window runs local shells and nothing else, so
-/// the SSH Client panel is **not built** — and the caller **removes** any dock
-/// that is already there rather than simply not adding one. Not adding was the
-/// original gate and it was not enough: `load_layout` restores the side docks by
-/// name before either builder runs, so the dock existed before anyone declined
-/// to create it (`IN-0043` MAJ-2). An elevated window now also never reads
-/// `docks.json` at all (`OneTermWorkspace::new`), which is the primary fix; this
-/// is the second lock on the same door. `record_right_dock_choice` and
-/// `apply_right_dock_width` both early-return on `!has_dock(Right)`.
+/// Confirmed administrator windows permit explicit SSH/SFTP access. Unknown token
+/// status still fails closed, and the caller removes any pre-existing right dock.
 ///
 /// The outer `Option` is the caller's existing "the dock area is gone" signal;
 /// the inner one is the elevation gate.
@@ -83,7 +74,7 @@ fn right_dock(
     window: &mut Window,
     cx: &mut App,
 ) -> Option<Option<DockLayout>> {
-    if oneterm_core::elevation::is_restricted() {
+    if !oneterm_actions::action_allowed_when_elevated("open_session") {
         return Some(None);
     }
     let panel = super::build_named_panel(panel_names::SSH_CLIENT, dock_area, window, cx)?;

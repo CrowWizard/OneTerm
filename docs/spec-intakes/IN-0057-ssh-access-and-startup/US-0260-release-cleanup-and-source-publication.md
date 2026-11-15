@@ -28,8 +28,8 @@ tests and owning documentation to the configured GitHub origin.
 
 - [x] Final EXE hash unchanged; settings/credentials match prior smoke, with only normal user layout saves differing.
 - [x] Only final runtime delivery files remain under target/release.
-- [ ] No generated build or runtime data files enter the commit.
-- [ ] Authorized source commit is present on the configured origin.
+- [x] No generated build or runtime data files enter the commit.
+- [x] Authorized source commit is present on the configured origin.
 
 ## Documentation
 
@@ -50,7 +50,7 @@ Harness tool was unavailable in prior discovery; no database status is claimed.
 
 - [x] Inspect paths and hash preserved runtime files.
 - [x] Remove explicit contained build-intermediate paths and verify hashes.
-- [ ] Audit/stage source, inspect commit inventory and publish normally.
+- [x] Audit/stage source, inspect commit inventory and publish normally.
 
 ## Verification Plan
 
@@ -89,4 +89,15 @@ file above 5 MB, detected private-key/token signatures, or generated/runtime
 paths. target, .tmp and .cargo-home remain ignored and untracked. Existing
 .tmp backups/evidence/build inputs and .cargo-home were deliberately retained.
 No rebuild was run after cleanup; the implementation had already passed the
-full gates recorded in US-0249. Source publication remains the next step.
+full gates recorded in US-0249.
+
+Source publication PASS: commit
+708870c990b5160e5646e1c324c92793886d47aa
+(`feat(native): integrate native terminal workspace and directional split drops`)
+was pushed normally to origin/main at github.com:CrowWizard/OneTerm.git.
+git ls-remote confirmed the remote main identity equals that source commit.
+The staged audit covered 285 files, with zero forbidden paths, detected secret
+signatures, tracked build files, unstaged changes or untracked publishable
+files. Both working and staged whitespace checks passed. No force push,
+tag, GitHub Release or binary upload was performed. This documentation-only
+publication reconciliation is committed separately after the source push.

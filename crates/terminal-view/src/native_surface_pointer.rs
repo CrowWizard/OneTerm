@@ -87,7 +87,9 @@ impl NativeTerminalSurface {
                 .as_ref()
                 .is_some_and(|settings| settings.read(cx).show_context_menu)
         {
-            // The enclosing pane owns this press; never also send it to the PTY.
+            // The enclosing context-menu wrapper owns this press. Returning
+            // keeps it out of the PTY while allowing the wrapper's bubbling
+            // listener to open the menu.
             return;
         }
         if self
@@ -184,8 +186,23 @@ impl NativeTerminalSurface {
         if event.button == MouseButton::Left
             && self.selection_move(event.position, Some(MouseButton::Left))
         {
-            self.finish_selection();
+            let copy_on_select = self
+                .settings
+                .as_ref()
+                .is_some_and(|settings| settings.read(cx).copy_on_select);
+            self.finish_selection_with_copy(copy_on_select);
             cx.stop_propagation();
+        }
+        if event.button == MouseButton::Right
+            && self
+                .settings
+                .as_ref()
+                .is_some_and(|settings| settings.read(cx).show_context_menu)
+        {
+            // The enclosing context menu owns this release. Do not expose a
+            // cancelled menu gesture to another input handler.
+            cx.stop_propagation();
+            return;
         }
         let Some(index) = self
             .pointer

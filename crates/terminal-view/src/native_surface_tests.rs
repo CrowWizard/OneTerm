@@ -2253,6 +2253,8 @@ fn native_surface_drag_coalesces_motion_copies_native_text_and_finishes_outside(
     use gpui::{MouseDownEvent, MouseMoveEvent, MouseUpEvent, point};
     cx.executor().allow_parking();
     cx.update(gpui_component::init);
+    let settings = cx.new(|_| oneterm_settings::TerminalSettings::default());
+    settings.update(cx, |settings, _| settings.copy_on_select = true);
     let engine = Arc::new(AsyncEngine::spawn(16, 3).unwrap());
     let mut endpoint = Endpoint::new(engine.model());
     endpoint.selection_engine = Some(engine.clone());
@@ -2269,6 +2271,9 @@ fn native_surface_drag_coalesces_motion_copies_native_text_and_finishes_outside(
             window,
             cx,
         )
+    });
+    surface.update(cx, |surface, cx| {
+        surface.bind_settings(settings.clone(), cx)
     });
     cx.update(|window, cx| {
         let _ = window.draw(cx);
@@ -2350,7 +2355,6 @@ fn native_surface_drag_coalesces_motion_copies_native_text_and_finishes_outside(
             .as_deref(),
         Some("native")
     );
-    surface.update(cx, |surface, cx| surface.copy_clipboard(cx));
     let copy_deadline = Instant::now() + Duration::from_secs(20);
     while surface.read_with(cx, |surface, _| surface.edit.busy) {
         cx.run_until_parked();

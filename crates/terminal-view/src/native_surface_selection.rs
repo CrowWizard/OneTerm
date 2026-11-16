@@ -17,6 +17,7 @@ type Sample = (Viewport, Coordinate);
 struct Pending {
     sample: Option<Sample>,
     finish: bool,
+    copy: bool,
 }
 
 #[derive(Default)]
@@ -108,6 +109,7 @@ impl NativeTerminalSurface {
         let session = self.session.clone();
         self.drag.task = Some(cx.spawn(async move |surface, cx| {
             let id = GestureId::default();
+            let mut copy = false;
             let mut result = session
                 .selection(Update::Gesture(Gesture::Begin {
                     id: id.clone(),
@@ -122,9 +124,9 @@ impl NativeTerminalSurface {
                 if rx.recv().await.is_err() {
                     break;
                 }
-                let (sample, finish) = {
+                let (sample, finish, pending_copy) = {
                     let mut pending = pending.borrow_mut();
-                    (pending.sample.take(), pending.finish)
+                    (pending.sample.take(), pending.finish, pending.copy)
                 };
                 if let Some((viewport, coordinate)) = sample {
                     result = session
@@ -136,6 +138,7 @@ impl NativeTerminalSurface {
                         .await;
                 }
                 if finish {
+                    copy = pending_copy;
                     break;
                 }
             }
@@ -152,6 +155,9 @@ impl NativeTerminalSurface {
                 }
                 if let Err(error) = cleanup {
                     (surface.on_error)(NativeSurfaceError::Edit(error), cx);
+                }
+                if copy {
+                    surface.copy_clipboard(cx);
                 }
                 cx.notify();
             }) {
@@ -183,10 +189,15 @@ impl NativeTerminalSurface {
     }
 
     pub(super) fn finish_selection(&mut self) -> bool {
+        self.finish_selection_with_copy(false)
+    }
+
+    pub(super) fn finish_selection_with_copy(&mut self, copy: bool) -> bool {
         if self.drag.wake.is_none() {
             return false;
         }
         self.drag.pending.borrow_mut().finish = true;
+        self.drag.pending.borrow_mut().copy = copy;
         self.wake_selection();
         true
     }

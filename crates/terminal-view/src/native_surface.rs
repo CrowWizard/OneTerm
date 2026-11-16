@@ -224,11 +224,11 @@ impl NativeTerminalSurface {
         if self.clipboard_key(event, cx) {
             return;
         }
-        let Some(viewport) = self.session.query().viewport else {
+        if self.session.query().viewport.is_none() {
             // No invented power-on modes. A publication is required for choosing
             // between keyboard text and IME ownership.
             return;
-        };
+        }
         let stroke = &event.keystroke;
         // Composition owns Enter/arrows too; they choose candidates rather than
         // submitting a line to the application behind the IME.
@@ -240,10 +240,9 @@ impl NativeTerminalSurface {
         };
         let functional = key.code != KeyCode::UNIDENTIFIED;
         let chord = stroke.modifiers.control || stroke.modifiers.alt || stroke.modifiers.platform;
-        if !functional
-            && !viewport.metadata().alternate_screen
-            && (!chord || event.prefer_character_input)
-        {
+        // Screen-buffer selection does not change platform text ownership:
+        // TUIs need IME candidates just as primary-screen shells do.
+        if !functional && (!chord || event.prefer_character_input) {
             return;
         }
         key.action = if event.is_held {

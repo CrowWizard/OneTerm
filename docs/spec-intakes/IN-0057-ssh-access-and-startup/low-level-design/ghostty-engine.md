@@ -153,8 +153,11 @@ native session, not FakeTerminalSession or legacy TerminalSession. The caller
 retains lifecycle/reliable SessionEvent/security handling and explicitly invalidates
 the surface on output. The surface never takes or drops that event stream. Native
 functional keys use owner encoding; layout keys lacking physical platform codes
-use UNIDENTIFIED, never guessed letter positions. Plain primary-screen text stays
-on the GPUI IME path; alternate-screen text uses keys without duplicate commits.
+use UNIDENTIFIED, never guessed letter positions. Plain printable text stays
+on the GPUI IME path on both primary and alternate screens, so TUIs can open
+platform candidates. Screen-buffer changes do not disable composition or
+candidate geometry. Functional keys and control chords retain native encoding
+outside composition; active composition owns candidate navigation keys.
 IME state/errors retain the session bounds and clear-before-write semantics.
 Candidate placement conservatively anchors every UTF-16 preedit range at one
 published native cursor. It does not simulate Ghostty grapheme layout with the

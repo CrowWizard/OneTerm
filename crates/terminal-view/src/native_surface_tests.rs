@@ -2516,6 +2516,113 @@ fn native_terminal_tab_reaches_shell_without_changing_focus(cx: &mut TestAppCont
 }
 
 #[gpui::test]
+fn native_tui_ime_candidates_commit_and_primary_screen_return(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    let engine = AsyncEngine::spawn(16, 3).unwrap();
+    call(&engine, Command::Capture);
+    let endpoint = Arc::new(Endpoint::new(engine.model()));
+    let source = endpoint.clone();
+    let (surface, cx) = cx.add_window_view(move |window, cx| {
+        NativeTerminalSurface::new(
+            source,
+            gpui::font("monospace"),
+            px(14.),
+            |error, _| panic!("TUI IME failed: {error:?}"),
+            window,
+            cx,
+        )
+    });
+    for alternate in [false, true, false] {
+        let sequence = if alternate {
+            b"\x1b[?1049h\x1b[2;4H".as_slice()
+        } else {
+            b"\x1b[?1049l\x1b[2;4H".as_slice()
+        };
+        call(&engine, Command::Feed(sequence.to_vec()));
+        call(&engine, Command::Capture);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        endpoint.keys.lock().unwrap().clear();
+        endpoint.commits.lock().unwrap().clear();
+        surface.update_in(cx, |surface, window, cx| {
+            assert_eq!(
+                surface
+                    .session
+                    .query()
+                    .viewport
+                    .unwrap()
+                    .metadata()
+                    .alternate_screen,
+                alternate
+            );
+            assert!(surface.accepts_text_input(window, cx));
+            assert_eq!(
+                surface
+                    .selected_text_range(false, window, cx)
+                    .unwrap()
+                    .range,
+                0..0
+            );
+            surface.key_down(&down("n", false), window, cx);
+            assert!(
+                endpoint.keys.lock().unwrap().is_empty(),
+                "printable text belongs to IME"
+            );
+            surface.replace_and_mark_text_in_range(None, "ni", None, window, cx);
+            assert_eq!(surface.marked_text_range(window, cx), Some(0..2));
+            surface.key_down(&down("enter", false), window, cx);
+            surface.key_down(&down("up", false), window, cx);
+            assert!(
+                endpoint.keys.lock().unwrap().is_empty(),
+                "candidate keys cannot reach TUI"
+            );
+            let bounds = surface
+                .bounds_for_range(0..2, Bounds::default(), window, cx)
+                .unwrap();
+            let geometry = surface.state.borrow().geometry.unwrap();
+            assert_eq!(bounds.origin, geometry.cell_origin(1, 3));
+            surface.replace_text_in_range(None, "你好", window, cx);
+            assert!(surface.session.marked_text().is_none());
+            assert!(surface.held.is_empty());
+            assert_eq!(*endpoint.commits.lock().unwrap(), ["你好"]);
+            surface.key_down(&down("a", false), window, cx);
+            surface.replace_text_in_range(None, "a", window, cx);
+            assert!(
+                endpoint.keys.lock().unwrap().is_empty(),
+                "ASCII must not be sent twice"
+            );
+            assert_eq!(*endpoint.commits.lock().unwrap(), ["你好", "a"]);
+            for chord in ["up", "ctrl-c"] {
+                surface.key_down(&down(chord, false), window, cx);
+                surface.key_up(
+                    &KeyUpEvent {
+                        keystroke: Keystroke::parse(chord).unwrap(),
+                    },
+                    window,
+                    cx,
+                );
+            }
+            assert_eq!(
+                endpoint.keys.lock().unwrap().len(),
+                4,
+                "functional keys and chords retain press/release"
+            );
+            assert!(surface.held.is_empty());
+            surface.replace_and_mark_text_in_range(None, "cancel", None, window, cx);
+            surface.unmark_text(window, cx);
+            assert!(surface.marked_text_range(window, cx).is_none());
+            assert_eq!(
+                *endpoint.commits.lock().unwrap(),
+                ["你好", "a"],
+                "cancel does not commit"
+            );
+        });
+    }
+    complete(engine.close()).unwrap();
+}
+
+#[gpui::test]
 fn native_surface_render_keys_ime_and_errors_without_legacy_session(cx: &mut TestAppContext) {
     cx.update(gpui_component::init);
     let engine = AsyncEngine::spawn(16, 3).unwrap();

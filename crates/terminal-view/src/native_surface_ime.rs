@@ -8,10 +8,7 @@ use super::{NativeSurfaceError, NativeTerminalSurface};
 
 impl NativeTerminalSurface {
     fn accepts_composition(&self) -> bool {
-        self.session
-            .query()
-            .viewport
-            .is_some_and(|v| !v.metadata().alternate_screen)
+        self.session.query().viewport.is_some()
     }
 }
 
@@ -103,10 +100,7 @@ impl EntityInputHandler for NativeTerminalSurface {
         let query = self.session.query();
         let viewport = query.viewport?;
         let (col, row) = viewport.cursor().position?;
-        if viewport.metadata().alternate_screen
-            || col >= geometry.size.cols
-            || row >= geometry.size.rows
-        {
+        if col >= geometry.size.cols || row >= geometry.size.rows {
             return None;
         }
         // Conservative anchor: no claim that UTF-16 units equal native cells.

@@ -74,7 +74,21 @@ jobs:
       - name: Native workspace strict lint
         run: cargo clippy --locked --workspace --all-targets --features oneterm-app/native-desktop -- -D warnings
       - name: Native workspace tests including terminal Tab dispatch
-        run: cargo test --locked --workspace --features oneterm-app/native-desktop
+        run: |
+          New-Item -ItemType Directory -Force .tmp | Out-Null
+          cargo test --locked --workspace --features oneterm-app/native-desktop 2>&1 |
+            Tee-Object -FilePath .tmp/native-workspace-tests.log
+          $testExit = $LASTEXITCODE
+          exit $testExit
+      - name: Upload native test diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-test-diagnostics-${{ github.sha }}-${{ github.run_attempt }}
+          path: .tmp/native-workspace-tests.log
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Build native desktop executable
         run: cargo build --locked --release -p oneterm-app --features native-desktop --bin oneterm-native-desktop
       - name: Package allowlisted runtime and provenance

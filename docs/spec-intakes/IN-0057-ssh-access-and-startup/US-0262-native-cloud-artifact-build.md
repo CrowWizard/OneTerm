@@ -80,6 +80,46 @@ entries before upload. Preserve existing multi-platform CI unchanged.
 
 ## Evidence and Gaps
 
+### Cloud acceptance rework
+
+Run 43815762923 at e9febd94 failed in native workspace tests after the full
+workspace gate, pinned native build and native strict Clippy passed. The user
+provided the failure tail: local-shell 75 passed, one failed, three ignored;
+configuration_events_controls_and_lifecycle timed out at line 843 while
+waiting for sanitized title and cwd publication. Public job metadata confirms
+the failed step; anonymous full-log access returned 403 and per-step access
+404, so no additional unseen diagnostics are claimed.
+
+Rework plan: make the Unicode title fixture's Console.OutputEncoding explicitly
+UTF-8, retain its bidi sanitization assertion and 25-second deadline, add
+phase-specific title/cwd/state/output diagnostics, and retain native test logs
+as an always-uploaded diagnostic artifact without allowing failed tests to
+produce a runtime package. The existing custom PowerShell fixture bypasses
+the normal PowerShell initialization, so its encoding is locale-dependent;
+this is a candidate cause, not yet a proven cloud root cause.
+
+Owning docs reviewed for rework: native-workspace.md, scripts/ghostty-vt/README.md,
+ghostty_session_tests.rs, core/config/shell.rs, security_policy.rs and native
+event-policy regressions. No runtime contract change: preserve shell config,
+title sanitization, timeout and all gates; only test setup/diagnostics change.
+Harness reopening tool remains unavailable; this is acceptance rework of the
+same packet, not a new shipped-defect record. Verify with local static checks
+only, then the cloud native workspace test step; no local compilation.
+
+Applied the deterministic output-encoding candidate repair and phase-specific
+diagnostics for metadata, configured startup and resize/input waits. The
+25-second deadlines, expected sanitized title and all runtime assertions stay
+unchanged. The workflow saves native workspace output with Tee-Object and
+propagates Cargo's exit status, then uploads only that explicit log even on
+failure. Hidden-file inclusion is scoped to the exact .tmp log, not caches
+or user data. Runtime build/package/upload still require preceding success.
+
+Rework static checks PASS: rustfmt --check for the changed test, PowerShell AST
+parsing of four workflow blocks, English/doc-path/dependency-policy checks,
+and git diff --check. No local compiler/test invocation occurred. Actual cloud
+verification of the candidate repair is pending commit/push and a new run;
+the first failure remains unresolved until that evidence is available.
+
 The previous owned Zig/download worker was stopped (completion exit 255).
 Implemented .github/workflows/native-build.yml with manual dispatch and main
 push triggers, pinned actions and downloads, bundled full gate, native strict

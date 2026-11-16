@@ -345,6 +345,9 @@ verifies pinned Ghostty/Zig downloads, builds the native library, runs strict
 native workspace Clippy and tests (including Tab dispatch), then builds the
 `oneterm-native-desktop` release-profile binary. Existing cross-platform CI
 remains unchanged. A failed gate prevents runtime artifact upload.
+Native workspace test output is separately retained for 14 days in
+`native-test-diagnostics-<commit>-<attempt>`, including on failure. This
+diagnostic artifact is not a runtime build and does not bypass failed gates.
 
 On success download `oneterm-native-windows-x64-<commit>` from that run's
 Artifacts within 14 days. It contains a ZIP and its SHA256 sidecar. Extract

@@ -824,7 +824,9 @@ fn native_local_session_configuration_events_controls_and_lifecycle() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<NativeLocalSession>();
     let _spawns = crate::spawn_guard::lock_spawns();
-    let script = "[Console]::WriteLine('CFG:'+ $env:ONETERM_NATIVE_SESSION_TEST); [Console]::WriteLine('CWD:'+ (Get-Location).Path); [Console]::Write([char]27 + ']2;session' + [char]0x202e + 'safe' + [char]7); [Console]::Write([char]27 + ']7;file:///C:/native%20session' + [char]7); $a=[Console]::ReadLine(); [Console]::WriteLine('SIZE:'+ [Console]::WindowWidth + ':' + [Console]::WindowHeight + ':ACK:' + $a); $b=[Console]::ReadLine(); exit 7";
+    // Custom shells bypass powershell_init; preserve the Unicode title on any
+    // runner code page before checking the shared bidi sanitization policy.
+    let script = "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); [Console]::WriteLine('CFG:'+ $env:ONETERM_NATIVE_SESSION_TEST); [Console]::WriteLine('CWD:'+ (Get-Location).Path); [Console]::Write([char]27 + ']2;session' + [char]0x202e + 'safe' + [char]7); [Console]::Write([char]27 + ']7;file:///C:/native%20session' + [char]7); $a=[Console]::ReadLine(); [Console]::WriteLine('SIZE:'+ [Console]::WindowWidth + ':' + [Console]::WindowHeight + ':ACK:' + $a); $b=[Console]::ReadLine(); exit 7";
     let session = NativeLocalSession::spawn(
         config(script),
         PtySize { cols: 80, rows: 24 },
@@ -840,10 +842,29 @@ fn native_local_session_configuration_events_controls_and_lifecycle() {
     assert_eq!(lifecycle.kind(), SessionKind::Local);
     assert!(lifecycle.alive());
     let model = session.model();
-    until(|| session.title().as_deref() == Some("sessionsafe") && session.cwd().is_some());
+    let wait_for = |phase: &str, ready: &mut dyn FnMut() -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(25);
+        while !ready() {
+            assert!(
+                Instant::now() < deadline,
+                "native session deadline ({phase}): title={:?}, cwd={:?}, alive={}, state={:?}, output={:?}",
+                session.title(),
+                session.cwd(),
+                session.alive(),
+                model.query().state,
+                text(&model),
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    wait_for("sanitized title and cwd", &mut || {
+        session.title().as_deref() == Some("sessionsafe") && session.cwd().is_some()
+    });
     assert_eq!(session.cwd().unwrap(), PathBuf::from("C:/native session"));
     let expected_cwd = format!("CWD:{}", std::env::current_dir().unwrap().display());
-    until(|| text(&model).contains("CFG:configured") && text(&model).contains(&expected_cwd));
+    wait_for("configured environment and startup directory", &mut || {
+        text(&model).contains("CFG:configured") && text(&model).contains(&expected_cwd)
+    });
     session.release_repaint_hint();
     session
         .resize(WindowSize {
@@ -857,7 +878,9 @@ fn native_local_session_configuration_events_controls_and_lifecycle() {
     key.text = "ping".into();
     session.key(key).unwrap();
     session.key(KeyEvent::new(KeyCode::ENTER)).unwrap();
-    until(|| text(&model).contains("SIZE:100:30:ACK:ping"));
+    wait_for("resize and input acknowledgement", &mut || {
+        text(&model).contains("SIZE:100:30:ACK:ping")
+    });
     session.write(b"exit\r").unwrap();
     let mut wait = Box::pin(session.wait());
     let mut result = None;

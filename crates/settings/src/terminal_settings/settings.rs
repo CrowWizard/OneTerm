@@ -11,8 +11,8 @@ use gpui::{App, AppContext, Entity, FontWeight, Global, Hsla, SharedString};
 use oneterm_core::LocalShellConfig;
 
 use crate::terminal_config::{
-    CompletionConfig, LoggingConfig, SemanticHighlightingMode, SftpConfig, SshSettingsConfig,
-    TabTitleMode, TerminalConfig,
+    CompletionConfig, LoggingConfig, MouseDragPriority, SemanticHighlightingMode, SftpConfig,
+    SshSettingsConfig, TabTitleMode, TerminalConfig,
 };
 
 /// Terminal cursor shape.
@@ -126,6 +126,8 @@ pub struct TerminalSettings {
     pub show_context_menu: bool,
     /// Copy the selection to the clipboard when the mouse button is released.
     pub copy_on_select: bool,
+    /// Native left-drag ownership when the application enables mouse reporting.
+    pub drag_priority: MouseDragPriority,
     /// Paste the clipboard on a middle-button click.
     pub middle_click_paste: bool,
 

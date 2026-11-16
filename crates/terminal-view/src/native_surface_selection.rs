@@ -86,7 +86,11 @@ impl NativeTerminalSurface {
             return false;
         };
         let modes = &viewport.metadata().modes;
+        let selection_first = self.settings.as_ref().is_some_and(|settings| {
+            settings.read(cx).drag_priority == oneterm_settings::MouseDragPriority::Selection
+        });
         if !shift
+            && !selection_first
             && (modes.mouse_x10 || modes.mouse_normal || modes.mouse_button || modes.mouse_any)
         {
             return false;

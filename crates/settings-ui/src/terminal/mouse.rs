@@ -1,8 +1,8 @@
 //! Mouse settings group.
 
-use gpui::App;
+use gpui::{App, SharedString};
 use gpui_component::setting::{SettingField, SettingGroup, SettingItem};
-use oneterm_settings::TerminalSettings;
+use oneterm_settings::{MouseDragPriority, TerminalSettings};
 
 use super::set;
 
@@ -10,6 +10,30 @@ use super::set;
 pub(super) fn group() -> SettingGroup {
     SettingGroup::new()
         .title("Mouse")
+        .item(
+            SettingItem::new(
+                "Drag Priority",
+                SettingField::dropdown(
+                    vec![
+                        (SharedString::from("selection"), SharedString::from("Selection First")),
+                        (SharedString::from("tui_mouse"), SharedString::from("TUI Mouse First")),
+                    ],
+                    |cx: &App| SharedString::from(match TerminalSettings::global(cx).read(cx).drag_priority {
+                        MouseDragPriority::Selection => "selection",
+                        MouseDragPriority::TuiMouse => "tui_mouse",
+                    }),
+                    |val: SharedString, cx: &mut App| {
+                        let priority = match val.as_ref() {
+                            "selection" => MouseDragPriority::Selection,
+                            _ => MouseDragPriority::TuiMouse,
+                        };
+                        set(cx, |s| s.drag_priority = priority);
+                    },
+                )
+                .default_value("tui_mouse"),
+            )
+            .description("Native terminals: Selection First reserves left dragging for text; TUI Mouse First keeps application mouse controls (hold Shift to select). Automatic copying requires Copy on Select."),
+        )
         .item(
             SettingItem::new(
                 "Right-Click Context Menu",

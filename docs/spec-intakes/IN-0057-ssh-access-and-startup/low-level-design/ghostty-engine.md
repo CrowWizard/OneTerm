@@ -97,7 +97,8 @@ while cleanup is pending. Dropping an admitted task retains session fail-stop.
 View teardown signals finish and detaches the single gesture task to release an
 idle start anchor too; it does not abandon an acknowledged idle gesture. The
 embedding caller still owns reliable-event draining and session shutdown.
-Left drag is local when mouse reporting is disabled or Shift overrides it;
+Left drag is local when mouse reporting is disabled, Shift overrides it, or
+the live native Drag Priority preference is Selection First;
 already-admitted mouse presses keep their release obligation. Word/line/rectangle
 selection and search remain separate. This is not a production selector.
 

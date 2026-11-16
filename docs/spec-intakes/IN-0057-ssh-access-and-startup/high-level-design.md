@@ -14,6 +14,23 @@ default saved SSH session for application startup.
 
 ## Architecture
 
+### Native drag priority (2026-11-16)
+
+Settings owns `terminal.json.mouse.drag_priority`: `tui_mouse` (default, preserves
+existing behavior) or `selection`. The native surface reads the live preference
+when a left gesture begins. Selection-first reserves the complete left gesture
+for local selection, even when the program requests mouse reporting. TUI-first
+keeps ordinary left gestures with the application while Shift forces selection.
+Copy-on-select remains a separate clipboard permission. Wheel, right/middle
+buttons, IME and legacy sessions are unchanged. No process-name exceptions.
+
+```text
+Settings > Terminal > Mouse
+  Drag Priority [TUI Mouse First v]
+                Selection First
+  Copy on Select [existing switch]
+```
+
 ### Terminal New SSH context-menu entry (2026-11-14)
 
 Native, legacy and empty-Space terminal menus expose the same New SSH submenu.

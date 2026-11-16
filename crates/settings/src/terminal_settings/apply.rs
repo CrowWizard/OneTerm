@@ -79,6 +79,7 @@ impl TerminalSettings {
 
             show_context_menu: mouse.show_context_menu,
             copy_on_select: mouse.copy_on_select,
+            drag_priority: mouse.drag_priority,
             middle_click_paste: mouse.middle_click_paste,
 
             scroll_multiplier: scroll.multiplier,

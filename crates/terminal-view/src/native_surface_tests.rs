@@ -2416,6 +2416,72 @@ fn native_surface_drag_coalesces_motion_copies_native_text_and_finishes_outside(
         Some("nat")
     );
     assert!(errors.borrow().is_empty(), "{:?}", errors.borrow());
+    // TUI-first rejects ordinary selection admission while mouse reporting is on.
+    surface.update(cx, |surface, cx| {
+        assert!(!surface.selection_down(position(0.25), false, cx));
+    });
+    settings.update(cx, |settings, _| {
+        settings.drag_priority = oneterm_settings::MouseDragPriority::Selection;
+        settings.copy_on_select = false;
+    });
+    cx.update(|_, cx| {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string("keep clipboard".into()));
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    surface.update_in(cx, |surface, window, cx| {
+        surface.pointer_down(
+            &MouseDownEvent {
+                position: position(0.25),
+                button: MouseButton::Left,
+                ..Default::default()
+            },
+            window,
+            cx,
+        );
+        assert!(surface.drag.active(), "selection-first needs no Shift");
+    });
+    // A setting change takes effect on the next gesture, never halfway through.
+    settings.update(cx, |settings, _| {
+        settings.drag_priority = oneterm_settings::MouseDragPriority::TuiMouse;
+    });
+    surface.update_in(cx, |surface, window, cx| {
+        surface.pointer_move(
+            &MouseMoveEvent {
+                position: position(3.25),
+                pressed_button: Some(MouseButton::Left),
+                ..Default::default()
+            },
+            window,
+            cx,
+        );
+        surface.pointer_up(
+            &MouseUpEvent {
+                position: position(3.25),
+                button: MouseButton::Left,
+                ..Default::default()
+            },
+            window,
+            cx,
+        );
+    });
+    settle(cx);
+    assert!(endpoint.mice.lock().unwrap().is_empty());
+    assert_eq!(
+        complete(engine.model().selection_text())
+            .unwrap()
+            .as_deref(),
+        Some("nati")
+    );
+    cx.update(|_, cx| {
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().as_deref(),
+            Some("keep clipboard")
+        );
+    });
+    assert!(errors.borrow().is_empty(), "{:?}", errors.borrow());
+    let completed_before_drop = endpoint.selection_completed.load(Ordering::Relaxed);
     // Drop the gesture state while idle, as entity teardown does. Its one task
     // must complete Finish rather than leaking the owner-held start anchor.
     cx.update(|window, cx| {
@@ -2437,7 +2503,7 @@ fn native_surface_drag_coalesces_motion_copies_native_text_and_finishes_outside(
         )
     });
     let deadline = Instant::now() + Duration::from_secs(20);
-    while endpoint.selection_completed.load(Ordering::Relaxed) < 7 {
+    while endpoint.selection_completed.load(Ordering::Relaxed) < completed_before_drop + 1 {
         cx.run_until_parked();
         assert!(Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(1));
@@ -2445,7 +2511,7 @@ fn native_surface_drag_coalesces_motion_copies_native_text_and_finishes_outside(
     surface.update(cx, |surface, _| {
         drop(std::mem::take(&mut surface.drag));
     });
-    while endpoint.selection_completed.load(Ordering::Relaxed) < 8 {
+    while endpoint.selection_completed.load(Ordering::Relaxed) < completed_before_drop + 2 {
         cx.run_until_parked();
         assert!(Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(1));

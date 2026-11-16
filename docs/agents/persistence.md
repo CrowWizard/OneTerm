@@ -53,6 +53,12 @@ directly on the UI thread.
 
 ## Schema owners
 
+Native drag priority (US-0263) adds `terminal.json.mouse.drag_priority`, with
+`tui_mouse` (default, also when absent) and `selection` values. Settings owns the
+typed field and existing background snapshot writer; no schema bump or migration.
+Older builds ignore the field and drop it on their next save without losing
+other settings. Copy-on-select remains independent; legacy input is unchanged.
+
 PowerShell 7 executable settings (US-0250) reuse terminal.json's existing optional
 shell.program path, not a new field or schema. Empty input stores None for
 auto-detection. Kind changes clear the override; selecting the same kind retains

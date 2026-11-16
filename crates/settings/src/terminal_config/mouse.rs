@@ -2,6 +2,17 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Who owns a native terminal left drag while an application reports the mouse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MouseDragPriority {
+    /// Preserve application mouse controls; Shift forces terminal selection.
+    #[default]
+    TuiMouse,
+    /// Select terminal text without holding Shift.
+    Selection,
+}
+
 /// Mouse group.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -17,6 +28,8 @@ pub struct MouseConfig {
     /// Default `true` (the historical behaviour). Disable it to keep the
     /// clipboard untouched until an explicit Copy (SEC-10).
     pub copy_on_select: bool,
+    /// Native left-drag ownership. Defaults to TUI mouse controls.
+    pub drag_priority: MouseDragPriority,
     /// Paste the clipboard on a middle-button click (IN-0024).
     ///
     /// Default `true`. A program in mouse mode receives the click instead
@@ -27,6 +40,31 @@ pub struct MouseConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drag_priority_defaults_and_both_values_roundtrip() {
+        let old: MouseConfig = serde_json::from_str(r#"{"copy_on_select":false}"#).unwrap();
+        assert_eq!(old.drag_priority, MouseDragPriority::TuiMouse);
+        assert!(!old.copy_on_select);
+        for (value, priority) in [
+            ("tui_mouse", MouseDragPriority::TuiMouse),
+            ("selection", MouseDragPriority::Selection),
+        ] {
+            let config: MouseConfig =
+                serde_json::from_value(serde_json::json!({"drag_priority": value})).unwrap();
+            assert_eq!(config.drag_priority, priority);
+            assert_eq!(
+                serde_json::to_value(&config).unwrap()["drag_priority"],
+                value
+            );
+            let settings = crate::TerminalSettings::from_config(&crate::TerminalConfig {
+                mouse: config,
+                ..Default::default()
+            });
+            assert_eq!(settings.drag_priority, priority);
+            assert_eq!(settings.to_config().mouse.drag_priority, priority);
+        }
+    }
 
     #[test]
     fn right_click_context_menu_defaults_to_enabled() {
@@ -67,6 +105,7 @@ impl Default for MouseConfig {
         Self {
             show_context_menu: true,
             copy_on_select: true,
+            drag_priority: MouseDragPriority::default(),
             middle_click_paste: true,
         }
     }

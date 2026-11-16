@@ -26,7 +26,7 @@ pub use document::TerminalConfig;
 pub use font::FontConfig;
 pub use layout::{LayoutConfig, PaddingConfig, SemanticHighlightingMode, TabTitleMode};
 pub use logging::LoggingConfig;
-pub use mouse::MouseConfig;
+pub use mouse::{MouseConfig, MouseDragPriority};
 pub use scroll::ScrollConfig;
 pub use security::SecurityConfig;
 pub use sftp::{DEFAULT_EDIT_MAX_FILE_SIZE, EditorConfig, EditorMode, SftpConfig};

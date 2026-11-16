@@ -105,6 +105,7 @@ impl TerminalSettings {
             mouse: MouseConfig {
                 show_context_menu: self.show_context_menu,
                 copy_on_select: self.copy_on_select,
+                drag_priority: self.drag_priority,
                 middle_click_paste: self.middle_click_paste,
             },
             bell: BellConfig {

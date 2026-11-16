@@ -2464,6 +2464,54 @@ fn native_surface_drag_coalesces_motion_copies_native_text_and_finishes_outside(
 }
 
 #[gpui::test]
+fn native_terminal_tab_reaches_shell_without_changing_focus(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    cx.update(crate::init);
+    let engine = AsyncEngine::spawn(16, 3).unwrap();
+    call(&engine, Command::Capture);
+    let endpoint = Arc::new(Endpoint::new(engine.model()));
+    let source = endpoint.clone();
+    let surface = Rc::new(RefCell::new(None));
+    let created = surface.clone();
+    let (_, cx) = cx.add_window_view(move |window, cx| {
+        let terminal = cx.new(|cx| {
+            NativeTerminalSurface::new(
+                source,
+                gpui::font("monospace"),
+                px(14.),
+                |error, _| panic!("Tab input failed: {error:?}"),
+                window,
+                cx,
+            )
+        });
+        window.focus(&terminal.read(cx).focus_handle(cx), cx);
+        *created.borrow_mut() = Some(terminal.clone());
+        gpui_component::Root::new(terminal, window, cx)
+    });
+    let surface = surface.borrow_mut().take().unwrap();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    for chord in ["tab", "shift-tab"] {
+        endpoint.keys.lock().unwrap().clear();
+        cx.simulate_keystrokes(chord);
+        cx.run_until_parked();
+        let keys = endpoint.keys.lock().unwrap();
+        let presses: Vec<_> = keys
+            .iter()
+            .filter(|key| matches!(key.action, KeyAction::Press))
+            .collect();
+        assert_eq!(presses.len(), 1, "{chord} is delivered once: {keys:?}");
+        assert_eq!(presses[0].code, KeyCode::TAB);
+        assert_eq!(presses[0].modifiers.shift, chord == "shift-tab");
+        drop(keys);
+        cx.update(|window, cx| {
+            assert!(surface.read(cx).focus.is_focused(window));
+        });
+    }
+    assert!(endpoint.commits.lock().unwrap().is_empty());
+    complete(engine.close()).unwrap();
+}
+
+#[gpui::test]
 fn native_surface_render_keys_ime_and_errors_without_legacy_session(cx: &mut TestAppContext) {
     cx.update(gpui_component::init);
     let engine = AsyncEngine::spawn(16, 3).unwrap();

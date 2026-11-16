@@ -26,7 +26,7 @@ pub use panel::{PanelSpec, TerminalPanel};
 pub use security::terminal_security_policy;
 pub use status::{find_in_active_terminal, new_terminal_with_shell_cmd, status_metrics};
 
-use gpui::App;
+use gpui::{App, KeyBinding, NoAction};
 use gpui_component::dock::{panel_handle, register_panel};
 use oneterm_state::panel_names;
 
@@ -36,6 +36,11 @@ use oneterm_state::panel_names;
 /// the app aggregator, which also passes [`status_metrics`] to
 /// `AppServices::install`.
 pub fn init(cx: &mut App) {
+    // Both native and legacy terminals own Tab; forms retain focus traversal.
+    cx.bind_keys([
+        KeyBinding::new("tab", NoAction {}, Some("Terminal")),
+        KeyBinding::new("shift-tab", NoAction {}, Some("Terminal")),
+    ]);
     panel::override_strip_menu(cx);
     register_panel(cx, panel_names::TERMINAL, |context, window, cx| {
         panel_handle(TerminalPanel::open(
@@ -47,6 +52,9 @@ pub fn init(cx: &mut App) {
         ))
     });
 }
+
+#[cfg(test)]
+mod key_binding_tests;
 #[cfg(feature = "ghostty-native")]
 mod native_workspace_sessions;
 #[cfg(feature = "ghostty-native")]

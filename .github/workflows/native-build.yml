@@ -1,0 +1,146 @@
+name: Native Windows Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'crates/**'
+      - 'scripts/**'
+      - '.github/workflows/native-build.yml'
+      - '.github/actions/setup-rust/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-windows:
+    name: Validate and package native Windows x64
+    runs-on: windows-2022
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      GHOSTTY_REVISION: fbb6dbe7ea5c1ce6df14ef82e00779a568cdb2a2
+      GHOSTTY_SOURCE_SHA256: 2ff4f0aaf595bc07d36b4a08cf3e85a52581e3be792b295ae34a5db481197f99
+      ZIG_VERSION: '0.17.1'
+      ZIG_SHA256: b03f477a1943673e02aca0f570e8030dffd536ce1f45cbc4d3326ec31159562e
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Set up pinned Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt, clippy
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.11'
+      - name: Verify bundled ConPTY
+        run: ./scripts/bump-conpty.ps1 -Check
+      - name: Full workspace quality gate
+        run: ./scripts/ci-local.ps1
+      - name: Download and verify pinned native inputs
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $work = Join-Path $env:GITHUB_WORKSPACE '.tmp/ghostty-migration'
+          New-Item -ItemType Directory -Force $work | Out-Null
+          $source = Join-Path $work 'ghostty.tar.gz'
+          $zig = Join-Path $work 'zig.zip'
+          Invoke-WebRequest -Uri "https://codeload.github.com/ghostty-org/ghostty/tar.gz/$env:GHOSTTY_REVISION" -OutFile $source
+          Invoke-WebRequest -Uri "https://ziglang.org/download/$env:ZIG_VERSION/zig-x86_64-windows-$env:ZIG_VERSION.zip" -OutFile $zig
+          if ((Get-FileHash $source -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:GHOSTTY_SOURCE_SHA256) {
+            throw 'Pinned Ghostty source checksum mismatch.'
+          }
+          if ((Get-FileHash $zig -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:ZIG_SHA256) {
+            throw 'Pinned Zig checksum mismatch.'
+          }
+          Expand-Archive -LiteralPath $zig -DestinationPath $work
+      - name: Build pinned libghostty-vt
+        run: |
+          ./scripts/ghostty-vt/build.ps1 `
+            -Zig ".tmp/ghostty-migration/zig-x86_64-windows-$env:ZIG_VERSION/zig.exe" `
+            -SourceArchive .tmp/ghostty-migration/ghostty.tar.gz
+          "GHOSTTY_VT_PREFIX=$(Join-Path $env:GITHUB_WORKSPACE '.tmp/ghostty-migration/install')" >> $env:GITHUB_ENV
+      - name: Native workspace strict lint
+        run: cargo clippy --locked --workspace --all-targets --features oneterm-app/native-desktop -- -D warnings
+      - name: Native workspace tests including terminal Tab dispatch
+        run: cargo test --locked --workspace --features oneterm-app/native-desktop
+      - name: Build native desktop executable
+        run: cargo build --locked --release -p oneterm-app --features native-desktop --bin oneterm-native-desktop
+      - name: Package allowlisted runtime and provenance
+        id: package
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $name = "oneterm-native-windows-x64-$env:GITHUB_SHA"
+          $dist = Join-Path $env:GITHUB_WORKSPACE 'dist'
+          $stage = Join-Path $dist $name
+          New-Item -ItemType Directory -Path (Join-Path $stage 'x64') -Force | Out-Null
+          $files = @{
+            'target/release/oneterm-native-desktop.exe' = 'oneterm-native-desktop.exe'
+            'target/release/conpty.dll' = 'conpty.dll'
+            'target/release/x64/OpenConsole.exe' = 'x64/OpenConsole.exe'
+            'LICENSE' = 'LICENSE'
+            'NOTICE' = 'NOTICE'
+            'THIRD-PARTY-NOTICES.md' = 'THIRD-PARTY-NOTICES.md'
+            'crates/app/assets/conpty-manifest.json' = 'conpty-manifest.json'
+            '.tmp/ghostty-migration/install/oneterm-build.json' = 'ghostty-build.json'
+          }
+          foreach ($entry in $files.GetEnumerator()) {
+            Copy-Item -LiteralPath $entry.Key -Destination (Join-Path $stage $entry.Value) -ErrorAction Stop
+          }
+          $source = Join-Path $env:GITHUB_WORKSPACE ".tmp/ghostty-migration/native-build/ghostty-$env:GHOSTTY_REVISION"
+          Copy-Item -LiteralPath (Join-Path $source 'LICENSE') -Destination (Join-Path $stage 'GHOSTTY-LICENSE')
+          @{
+            commit = $env:GITHUB_SHA
+            run = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+            attempt = $env:GITHUB_RUN_ATTEMPT
+            binary = 'oneterm-native-desktop.exe'
+            feature = 'native-desktop'
+            target = 'x86_64-pc-windows-msvc'
+            rust = (& rustc --version)
+            zig = $env:ZIG_VERSION
+            zig_sha256 = $env:ZIG_SHA256
+            ghostty_revision = $env:GHOSTTY_REVISION
+            ghostty_source_sha256 = $env:GHOSTTY_SOURCE_SHA256
+          } | ConvertTo-Json | Set-Content (Join-Path $stage 'build-info.json') -Encoding utf8
+          @(
+            'Native workspace acceptance build; not a production Release.'
+            'Run oneterm-native-desktop.exe after extracting the entire ZIP.'
+            'Runtime data is created in the EXE-sibling oneterm-native-data directory.'
+            'No connections, credentials, settings or runtime data are included.'
+            'Keep any existing runtime data; do not overwrite production installations.'
+            'Automated test success does not replace real GUI acceptance.'
+          ) | Set-Content (Join-Path $stage 'README.txt') -Encoding utf8
+          $expected = @($files.Values) + @('GHOSTTY-LICENSE', 'build-info.json', 'README.txt')
+          $actual = @(Get-ChildItem $stage -File -Recurse | ForEach-Object {
+            [IO.Path]::GetRelativePath($stage, $_.FullName).Replace('\', '/')
+          })
+          if (Compare-Object ($expected | Sort-Object) ($actual | Sort-Object)) {
+            throw 'Package contents differ from the explicit runtime allowlist.'
+          }
+          $zip = Join-Path $dist "$name.zip"
+          Compress-Archive -LiteralPath $stage -DestinationPath $zip -CompressionLevel Optimal
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $name.zip" | Set-Content "$zip.sha256" -Encoding ascii
+          "name=$name" >> $env:GITHUB_OUTPUT
+          "### Native Windows x64 artifact`n`n$name.zip`n`nSHA256: $hash`n`nDownload under this run's Artifacts. No GitHub Release was created." >> $env:GITHUB_STEP_SUMMARY
+      - name: Upload native runtime ZIP and checksum
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: |
+            dist/${{ steps.package.outputs.name }}.zip
+            dist/${{ steps.package.outputs.name }}.zip.sha256
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0

@@ -336,6 +336,31 @@ remaining parity and real GUI acceptance still precede application cutover.
 
 ## Pinned inputs
 
+### Cloud native desktop artifact
+
+Use GitHub Actions **Native Windows Build** (`.github/workflows/native-build.yml`)
+and **Run workflow**, or push relevant source/build changes to main. No local
+compilation is required. The workflow runs the bundled workspace quality gate,
+verifies pinned Ghostty/Zig downloads, builds the native library, runs strict
+native workspace Clippy and tests (including Tab dispatch), then builds the
+`oneterm-native-desktop` release-profile binary. Existing cross-platform CI
+remains unchanged. A failed gate prevents runtime artifact upload.
+
+On success download `oneterm-native-windows-x64-<commit>` from that run's
+Artifacts within 14 days. It contains a ZIP and its SHA256 sidecar. Extract
+the whole ZIP before running `oneterm-native-desktop.exe`; keep `conpty.dll`
+and `x64/OpenConsole.exe` beside it. Notices, the Ghostty license, native
+library provenance and commit/run metadata are included. Package entries
+are checked against an explicit allowlist: caches, sources, PDBs and user
+runtime data are excluded.
+
+This is the isolated native acceptance entry, not a production cutover. It
+creates EXE-sibling `oneterm-native-data` at runtime; existing connections,
+credentials and settings are not packaged or migrated. Do not replace an
+existing installation or delete its runtime data. No version bump, tag, GitHub
+Release or automatic updater publication occurs. Automated CI is not real GUI
+acceptance; until an actual cloud run passes, this workflow is unverified.
+
 - Official Ghostty source: `fbb6dbe7ea5c1ce6df14ef82e00779a568cdb2a2`.
 - Source tarball SHA-256:
   `2ff4f0aaf595bc07d36b4a08cf3e85a52581e3be792b295ae34a5db481197f99`.

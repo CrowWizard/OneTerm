@@ -12,6 +12,15 @@ complete workspace acceptance remain open. Production selection stays legacy.
 
 ## Existing seams verified
 
+### Terminal Tab routing (US-0261)
+
+Register Terminal-context Tab/Shift+Tab NoAction overrides in the shared
+terminal feature init, not in the legacy view constructor. Native-only app
+startup must suppress component focus traversal while the terminal owns
+focus, allowing its existing native key encoder to send Tab to the shell
+for completion. Ordinary controls outside that context retain Tab navigation.
+No shell completion policy or persisted key binding setting is changed.
+
 ### Directional split preview (owner rework 2026-11-16)
 
 Titles reveal only while dragging and keep

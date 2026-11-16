@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use async_channel::Receiver;
 use gpui::{
-    App, AsyncApp, ClipboardItem, Context, Entity, EntityId, EventEmitter, FocusHandle, KeyBinding,
-    NoAction, Subscription, Task, WeakEntity, Window,
+    App, AsyncApp, ClipboardItem, Context, Entity, EntityId, EventEmitter, FocusHandle,
+    Subscription, Task, WeakEntity, Window,
 };
 use gpui_component::ActiveTheme as _;
 use oneterm_core::{InputChannel, SessionDuplicateConfig};
@@ -208,12 +208,6 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) -> Self {
         let focus = cx.focus_handle();
-
-        // Tab / Shift+Tab must reach the PTY, not move focus.
-        cx.bind_keys([
-            KeyBinding::new("tab", NoAction {}, Some("Terminal")),
-            KeyBinding::new("shift-tab", NoAction {}, Some("Terminal")),
-        ]);
 
         // The session hands out its event receiver exactly once. A view is
         // the sole consumer, so `None` means another view already owns the

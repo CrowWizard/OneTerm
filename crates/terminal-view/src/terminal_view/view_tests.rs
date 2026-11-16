@@ -22,6 +22,26 @@ use super::test_support::{self, open_view, open_views};
 use crate::input::paste_clipboard;
 
 #[gpui::test]
+fn legacy_terminal_tab_reaches_shell_without_changing_focus(cx: &mut TestAppContext) {
+    let (session, probe) = FakeTerminalSession::boxed(24, 80, "");
+    let (view, cx) = open_view(cx, session);
+    let focus = view.read_with(cx, |view, _| view.focus.clone());
+    cx.update(|window, cx| {
+        window.focus(&focus, cx);
+        window.draw(cx).clear(cx);
+    });
+    for (chord, expected) in [
+        ("tab", b"\t".as_slice()),
+        ("shift-tab", b"\x1b[Z".as_slice()),
+    ] {
+        probe.take_writes();
+        cx.simulate_keystrokes(chord);
+        assert_eq!(probe.writes(), vec![expected.to_vec()], "{chord}");
+        cx.update(|window, _| assert!(focus.is_focused(window)));
+    }
+}
+
+#[gpui::test]
 fn ssh_close_shows_banner_once(cx: &mut TestAppContext) {
     let (session, probe) =
         FakeTerminalSession::boxed_with_kind(24, 80, "previous output", SessionKind::Ssh);

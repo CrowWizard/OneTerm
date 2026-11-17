@@ -2898,7 +2898,7 @@ fn native_surface_wheel_fractional_dispatch_geometry_and_rejection(cx: &mut Test
 }
 
 #[gpui::test]
-fn native_surface_alt_screen_owns_text_and_absent_publication_has_no_modes(
+fn native_surface_alt_screen_accepts_ime_and_absent_publication_has_no_modes(
     cx: &mut TestAppContext,
 ) {
     cx.update(gpui_component::init);
@@ -2918,21 +2918,34 @@ fn native_surface_alt_screen_owns_text_and_absent_publication_has_no_modes(
     surface.update_in(cx, |surface, window, cx| {
         assert!(!surface.accepts_text_input(window, cx));
         surface.key_down(&down("up", false), window, cx);
+        surface.replace_and_mark_text_in_range(None, "unpublished", None, window, cx);
+        surface.replace_text_in_range(None, "unpublished", window, cx);
+        assert!(surface.selected_text_range(false, window, cx).is_none());
+        assert!(surface.marked_text_range(window, cx).is_none());
+        assert!(endpoint.keys.lock().unwrap().is_empty());
+        assert!(endpoint.commits.lock().unwrap().is_empty());
         assert!(surface.held.is_empty());
     });
     call(&engine, Command::Feed(b"\x1b[?1049h".to_vec()));
     call(&engine, Command::Capture);
     surface.update_in(cx, |surface, window, cx| {
-        assert!(!surface.accepts_text_input(window, cx));
+        assert!(surface.accepts_text_input(window, cx));
         surface.key_down(&down("a", false), window, cx);
+        assert!(surface.held.is_empty());
+        assert!(endpoint.keys.lock().unwrap().is_empty());
+        surface.replace_and_mark_text_in_range(None, "a", None, window, cx);
+        assert_eq!(surface.marked_text_range(window, cx), Some(0..1));
         surface.replace_text_in_range(None, "a", window, cx);
+        assert!(surface.marked_text_range(window, cx).is_none());
+        assert!(endpoint.keys.lock().unwrap().is_empty());
+        surface.key_down(&down("up", false), window, cx);
         assert_eq!(surface.held.len(), 1);
     });
-    assert!(endpoint.commits.lock().unwrap().is_empty());
+    assert_eq!(*endpoint.commits.lock().unwrap(), ["a"]);
     let keys = endpoint.keys.lock().unwrap();
     assert_eq!(keys.len(), 1);
-    assert_eq!(keys[0].code, KeyCode::UNIDENTIFIED);
-    assert_eq!(keys[0].text, "a");
+    assert_eq!(keys[0].code, KeyCode::ARROW_UP);
+    assert!(matches!(keys[0].action, KeyAction::Press));
     drop(keys);
     surface.update(cx, |surface, cx| {
         surface.release_held_keys(cx);
@@ -2941,6 +2954,7 @@ fn native_surface_alt_screen_owns_text_and_absent_publication_has_no_modes(
     });
     let keys = endpoint.keys.lock().unwrap();
     assert_eq!(keys.len(), 2, "cleanup sends one release, never retries");
+    assert_eq!(keys[1].code, KeyCode::ARROW_UP);
     assert!(matches!(keys[1].action, KeyAction::Release));
     drop(keys);
     complete(engine.close()).unwrap();

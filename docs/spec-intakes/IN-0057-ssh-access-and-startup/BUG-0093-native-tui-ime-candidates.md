@@ -8,10 +8,10 @@ Created: 2026-11-16
 
 <!-- HARNESS:STATUS:BEGIN -->
 - [x] Planned
-- [ ] In progress
-- [x] Implemented
+- [x] In progress
+- [ ] Implemented
 - [ ] Changed
-- [ ] Reopened (acceptance rework)
+- [x] Reopened (acceptance rework)
 - [ ] Retired
 <!-- HARNESS:STATUS:END -->
 
@@ -94,6 +94,36 @@ checks only. User explicitly requested no local compilation or tests.
 <!-- HARNESS:PROOF:END -->
 
 ## Evidence and Gaps
+
+### Acceptance rework: 2026-11-17
+
+Native workflow run 43899389224 failed in the native workspace test step. Its
+authenticated failure log is unavailable, so the exact cloud failure list is
+not claimed. Source review found a definite contradictory regression:
+`native_surface_alt_screen_owns_text_and_absent_publication_has_no_modes` still
+requires alternate-screen IME rejection and raw printable-key delivery, while
+this packet deliberately enables alternate-screen IME and platform-owned text.
+
+Reopen this packet for acceptance rework, not a new shipped-behavior bug. The
+Harness tool is not exposed in this client catalog; status is recorded here.
+The reviewed native engine LLD already specifies the intended behavior and
+needs no contract change. Update the obsolete regression to assert alternate
+screen preedit and exact single commit, retain absent-publication rejection,
+and use a functional key to retain idempotent held-key cleanup assertions.
+Do not change production routing or disable tests. Run static checks only,
+then commit and push; cloud execution and manual IME acceptance remain open.
+
+The obsolete regression now asserts alternate-screen composition acceptance,
+preedit clearing on commit, exactly one ASCII commit and no printable native
+key. Arrow Up retains the native press and idempotent cleanup-release proof.
+Absent-publication assertions additionally reject preedit, text commits and
+selection-range admission. No production source or workflow was changed.
+
+Rework static checks passed: `cargo fmt --all -- --check`, `git diff --check`,
+`python scripts/check-doc-paths.py` (220 paths) and
+`python scripts/check-english.py` (1331 files). Local build, Clippy, tests and
+the full CI gate remain unexecuted per owner instruction. This fixes a definite
+source-level test contradiction, not a claim that all cloud failures are resolved.
 
 Native Windows IME and Codebuff acceptance require the cloud-built application
 and manual testing. No runtime success is claimed from source inspection.
